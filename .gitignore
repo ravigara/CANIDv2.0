@@ -36,6 +36,38 @@ unseen/
 identity_mapping.csv
 identity_test_review/
 
+# Image-only assets and local review material. Source code, YAML/JSON
+# configuration, documentation, and tests remain trackable.
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp
+*.gif
+*.tif
+*.tiff
+*.avif
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.jsonl
+*.sqlite
+*.sqlite3
+*.db
+*.tmp
+*.bak
+*.swp
+
+# Generated evaluation reports and local experiment metadata
+*_report.json
+*_manifest.json
+results.csv
+metrics.csv
+*.events*
+tensorboard/
+mlruns/
+
 # Generated model runs, results, galleries, and logs
 output/
 runs/
@@ -50,6 +82,8 @@ wandb/
 *.bin
 *.h5
 *.tflite
+*.ckpt
+*.model
 
 # Keep only the public root README; ignore export/cache README files
 **/README*
