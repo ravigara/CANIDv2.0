@@ -1,0 +1,63 @@
+# Python caches and test/build output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments and editor settings
+.venv/
+venv/
+env/
+.env
+.env.*
+.vscode/
+.agents/
+
+# Datasets, annotations, and Roboflow exports
+dataset/
+roboflow_export/
+detection_export/
+segmentation_export/
+anatomy_data/
+anatomy_data_partial_backup_*/
+anatomy_data_retrained_*/
+keypoint_export/
+keypoint_data/
+identity_data/
+identity_data_*/
+identity_crops/
+identity_crops_*/
+annotation_examples/
+unseen/
+identity_mapping.csv
+identity_test_review/
+
+# Generated model runs, results, galleries, and logs
+output/
+runs/
+wandb/
+*.log
+
+# Large model/checkpoint and deployment-export files
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+*.h5
+*.tflite
+
+# Keep only the public root README; ignore export/cache README files
+**/README*
+!/README.md
+
+# Packaging and operating-system files
+build/
+dist/
+*.egg-info/
+.DS_Store
+Thumbs.db

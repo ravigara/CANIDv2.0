@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# Dog Nose Biometric Identification System - default configuration
+# All paths are relative to the project root unless absolute.
+# ---------------------------------------------------------------------------
+system:
+  project_name: "Dog Nose Biometric Identification System"
+  seed: 42
+
+# Image / tensor conventions used across the pipeline
+image:
+  input_size: 224            # backbone input (Stage 7)
+  crop_size: 224             # rhinarium crop size for embedding
+  channels: 3
+
+# Embedding space (Stage 7)
+embedding:
+  dim: 256
+  weights: output/models/embedding_best.pt
+  # Cosine similarity regime the metric-learning objective targets
+  same_dog_min: 0.90
+  different_dog_max: 0.70
+
+# Identification thresholds (Stages 8/9)
+matching:
+  verify_threshold: 0.55     # >= -> Verified (same dog)
+  reject_threshold: 0.20     # <  -> Unknown Dog
+  max_distance: 0.30         # euclidean equivalent used by FAISS L2
+  top_k: 5
+
+# FAISS index (Stage 8)
+faiss:
+  # flat (exact, small scale) | ivf (approximate, 100k+) | hnsw
+  index_type: flat
+  nlist: 256                 # IVF clusters
+  nprobe: 16
+  metric: l2                 # l2 | inner_product (cosine on normalized vecs)
+
+# Validation (Stage 2)
+validation:
+  blur_lap_threshold: 100.0  # variance of Laplacian; below = blurry
+  brightness_min: 50.0
+  brightness_max: 220.0
+  min_nose_area_ratio: 0.05  # nose bbox must cover >= 5% of frame
+  max_nose_area_ratio: 0.60
+  quality_min: 60.0          # composite score gate
+  hard_reject: false         # development mode: report quality, do not stop ID
+
+# Detection (Stage 3) + Segmentation (Stage 5) + Landmarks (Stage 4)
+detection:
+    backend: torch
+    class_name: NOSE01
+    weights: output/models/detection_best.pt
+    conf_threshold: 0.50               # path to YOLOv12 .pt when available
+
+landmarks:
+  backend: torch
+  weights: output/models/landmarks_best.pt
+  device: 0
+  input_size: 256
+  crop_pad: 0.15
+  min_confidence: 0.50
+
+segmentation:
+  backend: torch
+  num_classes: 6             # rhinarium, left_nare, right_nare, philtrum, fold, background
+  weights: output/models/segmentation_retrained/segmentation_best
+  device: 0
+  dice_target: 0.95
+
+# Training (Stage 11)
+training:
+  image_size: 224
+  batch_size: 32
+  epochs: 100
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  optimizer: adamw
+  mixed_precision: true
+  early_stopping_patience: 10
+  # Metric learning losses; weights sum need not equal 1
+  losses:
+    arcface: 1.0
+    triplet: 0.5
+    contrastive: 0.3
+
+# Backbones available for embedding network
+backbones: [convnext_v2, vit, efficientnet_v2]
+backbone_default: efficientnet_v2   # mobile-friendly default
+
+# Data generation (Stage 1 synthetic)
+synth:
+  image_size: 256
+  num_dogs: 20               # for the demo dataset
+  images_per_dog: 10
+  base_dir: dataset
+
+# Output / artifacts
+output:
+  root: output
+  models_dir: output/models
+  index_dir: output/index
+  results_dir: output/results
