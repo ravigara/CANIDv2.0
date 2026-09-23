@@ -186,6 +186,96 @@ def test_embedding_is_normalized():
     assert abs(float(np.linalg.norm(v)) - 1.0) < 1e-3
 
 
+def test_anatomy_feature_crops_are_separate_and_available():
+    from noseid.embedding.features import FEATURE_NAMES, extract_feature_crops
+    from noseid.pipeline.crop import normalize_nose_crop
+    from noseid.types import LandmarkResult
+
+    g = NoseSynthGenerator(256, seed=3)
+    s = g.render_labeled("dog_001", 0)
+    landmarks = LandmarkResult(
+        left_nare=s["left_nare"], right_nare=s["right_nare"],
+        philtrum=s["philtrum"], valid=True)
+    normalized = normalize_nose_crop(
+        s["image"], s["bbox"], landmarks, s["masks"], CLASSES,
+        target_size=224)
+    crops = extract_feature_crops(normalized, CLASSES)
+    assert tuple(crops) == FEATURE_NAMES
+    assert all(crops[name].available for name in FEATURE_NAMES)
+    assert all(crops[name].image.shape == (224, 224, 3) for name in FEATURE_NAMES)
+
+
+def test_feature_index_stores_and_matches_per_region_templates(tmp_path):
+    from noseid.matching import FeatureIndex
+
+    cfg = {
+        "matching": {
+            "verify_threshold": 0.55,
+            "reject_threshold": 0.20,
+            "margin_threshold": 0.08,
+            "min_features": 2,
+            "embedding_version": "test-feature-v1",
+        }
+    }
+    idx = FeatureIndex(dim=4, cfg=cfg)
+    dog_a = {
+        "rhinarium": np.array([1, 0, 0, 0], dtype=np.float32),
+        "left_nare": np.array([0, 1, 0, 0], dtype=np.float32),
+        "right_nare": np.array([0, 0, 1, 0], dtype=np.float32),
+        "philtrum": np.array([0, 0, 0, 1], dtype=np.float32),
+    }
+    dog_b = {
+        name: np.roll(vector, 1) for name, vector in dog_a.items()
+    }
+    idx.enroll("dog_a", {name: [vector] for name, vector in dog_a.items()})
+    idx.enroll("dog_b", {name: [vector] for name, vector in dog_b.items()})
+    result = idx.identify(dog_a)
+    assert result.status == "Verified"
+    assert result.dog_id == "dog_a"
+    assert set(result.candidates[0]["feature_scores"]) == set(dog_a)
+    idx.save(str(tmp_path))
+    loaded = FeatureIndex.load(str(tmp_path))
+    assert loaded.get_record("dog_a")["embedding_version"] == "test-feature-v1"
+    assert loaded.identify(dog_a).dog_id == "dog_a"
+
+
+def test_feature_response_exposes_safe_candidate_profile_metadata():
+    from noseid.biometric import identification_response
+    from noseid.matching import FeatureIndex
+
+    idx = FeatureIndex(dim=2, cfg={"matching": {"min_features": 2}})
+    vectors = {
+        "rhinarium": np.asarray([1.0, 0.0], dtype=np.float32),
+        "left_nare": np.asarray([0.0, 1.0], dtype=np.float32),
+    }
+    idx.enroll("dog_a", vectors, metadata={
+        "name": "Rex", "photo_url": "/media/dog_a/profile.jpg",
+        "source": "private-local-path",
+    })
+    result = idx.identify(vectors)
+    response = identification_response(result, idx)
+
+    assert response["status"] == "recognized"
+    assert response["dog"] == {
+        "dog_id": "dog_a",
+        "name": "Rex",
+        "photo_url": "/media/dog_a/profile.jpg",
+    }
+    assert response["possible_matches"][0]["confidence_pct"] == "100.0%"
+    assert "source" not in response["possible_matches"][0]["dog"]
+
+
+def test_feature_index_delete_removes_template_and_metadata():
+    from noseid.matching import FeatureIndex
+
+    idx = FeatureIndex(dim=2, cfg={"matching": {"min_features": 1}})
+    idx.enroll("dog_a", {"rhinarium": np.asarray([1.0, 0.0], dtype=np.float32)})
+    assert idx.delete("dog_a") is True
+    assert idx.size == 0
+    assert idx.get_record("dog_a") is None
+    assert idx.delete("dog_a") is False
+
+
 # ---------- Stage 8/9: FAISS matching ---------------------------------------
 
 def test_index_enroll_and_identify():
@@ -216,7 +306,29 @@ def test_index_l2_distance_maps_to_cosine():
     idx.enroll("dog_001", [np.asarray([1.0, 0.0, 0.0], dtype=np.float32)])
     result = idx.identify(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
     assert result.status == "Verified"
-    assert result.similarity == pytest.approx(100.0, abs=1e-3)
+    assert result.similarity == pytest.approx(1.0, abs=1e-3)
+
+
+def test_embedding_store_persists_registration_metadata_and_reference_response(tmp_path):
+    from noseid.biometric import identification_response, registration_response
+    from noseid.matching import EmbeddingStore
+
+    idx = EmbeddingStore(dim=3)
+    enrolled = idx.enroll(
+        "dog_001",
+        [np.asarray([1.0, 0.0, 0.0], dtype=np.float32)],
+        metadata={"name": "Rex", "breed": "GSD"},
+    )
+    idx.save(str(tmp_path))
+    loaded = EmbeddingStore.load(str(tmp_path))
+
+    assert loaded.get_record("dog_001")["metadata"]["name"] == "Rex"
+    assert registration_response(enrolled)["nose_print_id"] == "dog_001"
+    result = loaded.identify(np.asarray([1.0, 0.0, 0.0], dtype=np.float32))
+    response = identification_response(result, loaded)
+    assert response["match"] is True
+    assert response["confidence"] == pytest.approx(1.0, abs=1e-3)
+    assert response["dog"]["name"] == "Rex"
 
 
 def test_index_save_load_roundtrip(tmp_path):

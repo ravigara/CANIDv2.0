@@ -1,26 +1,33 @@
 # Dog Nose Biometric Identifier
 
-A research-stage computer-vision pipeline for detecting a dog's nose,
-segmenting its anatomy, locating stable landmarks, and preparing normalized
-crops for future dog-identity matching.
+A research-stage dog registration and identification pipeline. It detects the
+nose, identifies anatomical parts, creates one normalized embedding per
+detected nose feature, and stores those feature templates in a persistent
+local vector gallery.
 
 > This project is not a production biometric system. Detection, segmentation,
 > and landmark accuracy do not establish identity accuracy. Real deployment
 > requires consent, privacy controls, security review, open-set evaluation,
 > and a secondary official identifier.
 
-## Pipeline
+## Active pipeline
 
-The project keeps four learning problems separate:
+The registration and identification path is intentionally limited to:
 
-1. **Detection** finds the nose pad using the single `NOSE01` class.
-2. **Anatomical segmentation** predicts the rhinarium, nares, philtrum, and
-   background.
-3. **Landmarks** predicts `left_nare`, `right_nare`, and `philtrum` points for
-   geometric alignment.
-4. **Identity embedding** and FAISS matching use the current development
-   checkpoint and gallery; session-separated evaluation is still required
-   before any biometric claim.
+1. **Nose detection** finds the single `NOSE01` object.
+2. **Parts identification** runs anatomical segmentation and the three
+   landmarks: `left_nare`, `right_nare`, and `philtrum`.
+3. **Feature embedding extraction** creates separate L2-normalized embeddings
+   for `rhinarium`, `left_nare`, `right_nare`, and `philtrum` with the existing
+   embedding checkpoint reused as a shared encoder.
+4. **Template storage/matching** averages each feature independently into a
+   dog template, stores the feature templates in
+  `output/index/feature_meta.json`, and applies weighted cosine similarity.
+  Identification selects the highest-confidence registered dog when its score
+  is strictly above 50%; the top-1/top-2 margin remains visible for review.
+
+Dataset generation, training, quality analysis, and biometric evaluation are
+separate development tools; they are not inserted into the active flow.
 
 The runtime supports trained Torch models and NumPy/OpenCV fallbacks where
 available. The CLI provides synthetic demonstration, enrollment,
@@ -33,8 +40,9 @@ identification, and evaluation commands.
   two nare classes remain the main quality limitation.
 - The three-point landmark model is trained and integrated, with an OpenCV
   heuristic fallback.
-- Identity embedding training is complete for the current supplied images;
-  the development gallery is enrolled and the identification smoke test runs.
+- Identity embeddings are stored as versioned per-feature centroid templates;
+  missing regions are omitted rather than fabricated. The current gallery
+  remains a development artifact.
 - The current identity split has unseen dogs in validation/test rather than
   repeat sessions of training dogs, so generalization is not yet measured.
 
@@ -60,11 +68,61 @@ the synthetic fallback demo and tests.
 
 ## Quick start
 
-Run the synthetic end-to-end demo without repository datasets:
+Run the development-only synthetic demo:
 
 ```bash
 python -m noseid.cli demo --dogs 12 --images 8
 ```
+
+Register a dog from several images. The detector and anatomical models run on
+every image; only the averaged per-feature templates are persisted:
+
+```bash
+python -m noseid.cli enroll --index output/index --dog DOG_001 \
+  --dir my_images --name Rex --breed GSD
+python -m noseid.cli identify --index output/index --image photo.jpg
+```
+
+Enrollment stores per-feature templates and metadata in
+`output/index/feature_meta.json`. Identification returns a
+reference-style response:
+
+```json
+{
+  "match": true,
+  "matched": true,
+  "message": "Match found",
+  "confidence": 0.8735,
+  "confidence_pct": "87.4%",
+  "margin": 0.1421,
+  "features_used": ["left_nare", "philtrum", "rhinarium", "right_nare"],
+  "dog": {"dog_id": "DOG_001", "name": "Rex", "breed": "GSD"}
+}
+```
+
+## Browser application
+
+The local web app uses the same active anatomy-feature pipeline and gallery.
+It supports multi-photo registration and single-photo identification. A
+recognized result includes the registered dog name and profile photo; an
+unrecognized result includes ranked possible matches with confidence scores.
+The Registered dogs section lists every profile; clicking one opens all photos
+stored for that registration. Registration captures the dog name, optional
+identification chip ID, colour, breed, age, blood type, and owner name/contact
+details. A profile can be deleted from its detail view after confirmation.
+
+Start it from the repository root:
+
+```powershell
+python run_frontend.py
+```
+
+Open <http://127.0.0.1:8000>. The first request loads the existing detector,
+segmentation, landmark, and embedding checkpoints. Registration saves the
+first submitted photo under the local registry and stores only the per-feature
+templates in `output/index/feature_meta.json`; it does not retrain anything.
+The service endpoints are `POST /api/register`, `POST /api/identify`,
+`GET /api/dogs`, `GET /api/dogs/{dog_id}`, and `GET /api/health`.
 
 Run the required checks:
 
@@ -75,7 +133,9 @@ pytest -q
 
 ## Trained inference
 
-Place externally managed checkpoints at the configured paths:
+Place externally managed checkpoints at the configured paths. The existing
+upstream model artifacts are reused; switching to feature templates does not
+require retraining them:
 
 ```text
 output/models/detection_best.pt
@@ -84,7 +144,7 @@ output/models/landmarks_best.pt
 output/models/embedding_best.pt
 ```
 
-Test one image with the detector, landmark model, and anatomy segmenter:
+Test one image with the detector, anatomy models, and feature embedder:
 
 ```bash
 python scripts/test_unseen.py --image path/to/image.jpg --device 0
@@ -151,49 +211,51 @@ landmarks for identity alignment.
 
 Use opaque dog IDs, session-separated train/validation/test splits, multiple
 captures per dog, and dogs absent from training for unknown-dog testing.
-Validate the dataset and review normalized crops before training:
+Validate the dataset and review anatomy-specific features before enrollment:
 
 ```bash
 python scripts/validate_identity_dataset.py --data identity_data
-python scripts/prepare_identity_crops.py \
-  --weights output/models/detection_best.pt \
-  --source identity_data --out identity_crops --device 0
-python scripts/train_embedding.py \
-  --train-dir identity_crops/train --val-dir identity_crops/valid \
-  --backbone efficientnet_v2 --embed-dim 256 \
-  --epochs 100 --batch-size 32 --device 0 --output output/models
+python scripts/build_identity_gallery.py \
+  --source-data identity_data \
+  --weights output/models/embedding_best.pt \
+  --output output/index --device 0
+python scripts/test_identity_gallery.py \
+  --source-data identity_data \
+  --weights output/models/embedding_best.pt \
+  --index output/index --device 0
+
+# Register every dog folder in one model-loaded run:
+python scripts/register_directory.py \
+  --source registration --index output/index --min-valid 3
 ```
 
-The completed current run produced `output/models/embedding_best.pt`. Build
-the FAISS gallery and run its disposable smoke test with:
-
-```bash
-python scripts/build_identity_gallery.py --device 0
-python scripts/test_identity_gallery.py --device 0
-```
+The completed current run produced `output/models/embedding_best.pt`; it is
+reused as a shared encoder and does not need to be retrained.
 
 The gallery artifacts are under `output/index/`; the smoke JSON is under
 `identity_test_review/`. Evaluate rank-1/rank-5 accuracy, genuine/impostor
 distributions, FAR, FRR, EER, unknown rejection, and latency on locked
 session-separated test data before calling the system biometric-ready.
 
-During current development, image-quality checks are reported as warnings so
-the identity model can still be tested on ordinary photographs. Images with
-no detected nose are still rejected. Use `--strict-quality` with `identify` or
-`enroll` to restore hard quality rejection.
+During current development, anatomy availability and quality remain review
+signals. Images with no detected nose are rejected, and `identify --debug`
+includes the per-feature diagnostics for manual review.
 
 ## Repository layout
 
 ```text
 noseid/                  Runtime package and model components
+  api/                  FastAPI service for the browser app
   data/                  Synthetic data and dataset helpers
-  embedding/             Embedding networks and metric-learning losses
+  embedding/             Shared embedding network, feature crops, and losses
   features/              Learned and classical feature extraction
-  matching/              FAISS enrollment and search
+  matching/              Legacy FAISS and anatomy-feature enrollment/search
   pipeline/              Validation, detection, landmarks, segmentation, crops
   training/              Training loop and biometric metrics
 config/default.yaml      Runtime paths and thresholds
 scripts/                 Import, training, evaluation, and preparation tools
+frontend/                No-build registration and identification UI
+run_frontend.py          Local Uvicorn entry point
 tests/                   Regression tests
 requirements.txt         Python dependencies
 ANNOTATION_GUIDE.md      Data and annotation contract

@@ -1,7 +1,7 @@
-"""Run the trained detector, landmarks, and anatomy segmenter on one unseen image.
+"""Run detector, anatomy models, and feature embeddings on one unseen image.
 
-The detector runs on the original image. Landmarks and segmentation then run
-on the padded detector crop, matching the training/inference contract.
+The detector runs on the original image. Landmarks, segmentation, and
+anatomy-specific embeddings then use the same padded detector crop contract.
 
 Example:
     python scripts/test_unseen.py --image unseen/my_nose.jpg --device 0
@@ -51,10 +51,13 @@ def _padded_box(box: np.ndarray, shape: tuple[int, int, int], pad: float):
 def run(image_path: str, output_dir: str, detector_weights: str,
         segmentation_weights: str, landmark_weights: str,
         conf: float = 0.50,
-        pad: float = 0.15, device: str = "0") -> dict:
+        pad: float = 0.15, device: str = "0",
+        embedding_weights: str | None = None) -> dict:
     import torch
     from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
     from ultralytics import YOLO
+    from noseid.embedding import Embedder
+    from noseid.embedding.features import FeatureEmbedder, extract_feature_crops
     from noseid.pipeline.landmarks import LandmarkDetector
     from noseid.pipeline.crop import normalize_nose_crop
 
@@ -152,6 +155,29 @@ def run(image_path: str, output_dir: str, detector_weights: str,
     normalized_path = out / f"{stem}_normalized_crop.jpg"
     cv2.imwrite(str(normalized_path), cv2.cvtColor(
         normalized.image, cv2.COLOR_RGB2BGR))
+    feature_embedder = FeatureEmbedder(Embedder(weights=embedding_weights))
+    feature_result = feature_embedder.embed(
+        image_rgb, landmarks, source_masks, CLASS_NAMES,
+        [float(v) for v in xyxy[best].tolist()])
+    feature_dir = out / f"{stem}_features"
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    feature_outputs = {}
+    feature_crops = extract_feature_crops(
+        normalized, CLASS_NAMES,
+        target_size=feature_embedder.target_size,
+        min_mask_area=feature_embedder.min_mask_area,
+        suppress_background=feature_embedder.suppress_background,
+    )
+    for name in (feature_result.crop_diagnostics or {}):
+        feature = feature_result.features_present
+        if name not in feature:
+            continue
+        # Reuse the same crop construction used by runtime embedding and make
+        # each region inspectable alongside the segmentation overlay.
+        crop = feature_crops[name].image
+        feature_path = feature_dir / f"{name}.jpg"
+        cv2.imwrite(str(feature_path), cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+        feature_outputs[name] = str(feature_path)
     report.update({
         "status": "ok",
         "detector_confidence": float(scores[best]),
@@ -168,6 +194,15 @@ def run(image_path: str, output_dir: str, detector_weights: str,
             "mask_used": normalized.mask_used,
             "fallback_reason": normalized.fallback_reason,
             "source_bbox": normalized.source_bbox,
+        },
+        "feature_embeddings": {
+            "representation": feature_result.representation,
+            "source": feature_result.source,
+            "embedding_size": feature_result.embedding_size,
+            "features_present": feature_result.features_present,
+            "feature_confidence": feature_result.feature_confidence,
+            "crop_diagnostics": feature_result.crop_diagnostics,
+            "outputs": feature_outputs,
         },
     })
     (out / f"{stem}_report.json").write_text(json.dumps(report, indent=2))
@@ -187,6 +222,8 @@ def main() -> None:
                     default=cfg["segmentation"]["weights"])
     p.add_argument("--landmark-weights",
                    default=cfg["landmarks"]["weights"])
+    p.add_argument("--embedding-weights",
+                   default=cfg["embedding"]["weights"])
     p.add_argument("--conf", type=float, default=0.50)
     p.add_argument("--pad", type=float, default=0.15)
     p.add_argument("--device", default="0")
@@ -194,7 +231,7 @@ def main() -> None:
     print(json.dumps(run(args.image, args.output, args.detector_weights,
                          args.segmentation_weights, args.landmark_weights,
                          args.conf, args.pad,
-                         args.device), indent=2))
+                         args.device, args.embedding_weights), indent=2))
 
 
 if __name__ == "__main__":

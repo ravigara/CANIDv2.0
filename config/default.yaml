@@ -16,14 +16,27 @@ image:
 embedding:
   dim: 256
   weights: output/models/embedding_best.pt
+  # The existing checkpoint is reused as a shared encoder for each region.
+  feature_crop_size: 224
+  feature_min_mask_area: 12
+  feature_mask_background: true
   # Cosine similarity regime the metric-learning objective targets
   same_dog_min: 0.90
   different_dog_max: 0.70
 
 # Identification thresholds (Stages 8/9)
 matching:
-  verify_threshold: 0.55     # >= -> Verified (same dog)
+  verify_threshold: 0.50     # accept the top candidate only above 50%
   reject_threshold: 0.20     # <  -> Unknown Dog
+  margin_threshold: 0.00     # top candidate wins when it clears the threshold
+  embedding_version: noseid-v2-anatomy-features
+  # Scores are averaged only over features present in both query and gallery.
+  feature_weights:
+    rhinarium: 1.0
+    left_nare: 1.0
+    right_nare: 1.0
+    philtrum: 0.8
+  min_features: 2
   max_distance: 0.30         # euclidean equivalent used by FAISS L2
   top_k: 5
 

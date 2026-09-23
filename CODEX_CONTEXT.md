@@ -1,6 +1,6 @@
 # Codex Project Handoff
 
-Last updated: 2026-09-06
+Last updated: 2026-09-23
 
 This is the durable handoff for the dog-nose biometric identifier. Read this
 file and `ANNOTATION_GUIDE.md` before changing the repository. Paths below are
@@ -540,6 +540,87 @@ biometric readiness claim. A useful next dataset improvement is overlapping
 known dogs across session-separated splits so rank-1/rank-5, FAR, FRR, EER,
 repeatability, and latency can be measured honestly.
 
+## Anatomy-specific embedding migration (2026-09-23)
+
+The active identity representation now follows the useful DoGNose runtime
+pattern of a frozen L2-normalized image encoder, centroid enrollment, cosine
+thresholding, and a top-1/top-2 margin, but stores separate templates for the
+four anatomy regions instead of one whole-nose vector:
+
+```text
+rhinarium, left_nare, right_nare, philtrum
+```
+
+`noseid/embedding/features.py` creates stable region crops from the trained
+segmentation masks, uses landmark centers only as a fallback for small/missing
+nare or philtrum masks, and applies the existing `output/models/embedding_best.pt`
+checkpoint as a shared encoder. No detector, segmentation, landmark, or
+embedding model retraining is required for this representation change.
+
+`noseid/matching/feature_index.py` stores the resulting per-feature centroids
+in `output/index/feature_meta.json`. Matching averages the available shared
+feature scores using the configured weights and rejects insufficient-feature
+queries. The active UI selects the top candidate when its score is strictly
+above 0.50; the top-1/top-2 margin is still returned for review but no longer
+blocks a threshold-clearing top candidate. The old `output/index/meta.json`
+and `nose.index` remain untouched as legacy whole-nose artifacts; pass
+`--legacy` to the CLI only when intentionally using them.
+
+Build and smoke-test the new gallery from original identity images with:
+
+```powershell
+python scripts\build_identity_gallery.py --source-data identity_data --device 0
+python scripts\test_identity_gallery.py --source-data identity_data --device 0
+```
+
+The new feature path was smoke-tested on `unseen/dimg.jpeg`: the existing
+detector found the nose at approximately 0.83 confidence, all four anatomy
+regions were present, and four 256-dimensional embeddings were produced.
+This is an integration smoke test, not a biometric acceptance result. Feature
+level accuracy still needs session-separated known-dog evaluation and unknown
+dog rejection calibration.
+
+The migrated gallery was smoke-tested on the current split: 16 identities,
+149 usable training images, and all four features represented for every
+enrolled identity. The complete smoke report recorded 140/187 train images as
+verified (38 processing errors and 9 rejected), with 26/57 valid and 22/41
+test images receiving a verified result. Because valid/test identities are
+currently unseen dogs, these are open-set smoke results only and are not a
+biometric acceptance metric.
+
+## Browser application (2026-09-23)
+
+The repository now includes a no-build browser frontend and a FastAPI service
+for the active feature gallery. Start it from the project root with:
+
+```powershell
+python run_frontend.py
+```
+
+The UI provides two flows:
+
+- Registration accepts a dog name, optional ID/breed, and at least three
+  photos. It runs the current detector -> anatomy -> feature-embedding flow,
+  persists the first photo as the display profile image, and saves metadata
+  plus anatomy-specific templates in `output/index/feature_meta.json`.
+- Identification accepts one photo. A recognized response includes the dog
+  name and profile photo. A non-match is explicitly labeled `Not recognized`
+  and includes ranked possible matches with confidence percentages.
+- The Registered dogs section lists all gallery profiles. Clicking a profile
+  displays every registration photo retained for that dog. New browser
+  registrations persist all submitted photos under `output/registry/`; the
+  existing folder-based registrations are migrated on first service load.
+- Registration metadata includes optional identification chip ID, colour,
+  breed, age, blood type, and structured owner details. The profile detail
+  view has a confirmation-protected delete action that removes the active
+  feature template and registry photos but leaves any original source folder
+  untouched.
+
+The service is implemented in `noseid/api/app.py`; the static UI is in
+`frontend/`. Raw embeddings are not exposed to the browser. The existing
+gallery and model checkpoints are loaded lazily on the first API request, so
+this UI does not trigger retraining.
+
 ## Safety and preservation rules
 
 - Preserve user data and existing changes.
@@ -561,7 +642,7 @@ repeatability, and latency can be measured honestly.
 - `config/default.yaml`: runtime paths and thresholds.
 - `scripts/train_detection.py`: YOLO detector training.
 - `scripts/train_segmentation.py`: SegFormer anatomy training.
-- `scripts/test_unseen.py`: detector plus segmentation test on one image.
+- `scripts/test_unseen.py`: detector, anatomy, and feature-embedding test on one image.
 - `scripts/evaluate_segmentation.py`: held-out segmentation IoU/Dice evaluator.
 - `scripts/validate_identity_dataset.py`: identity split/leakage preflight.
 - `scripts/roboflow_import.py`: COCO/YOLO import and mask/keypoint conversion.
@@ -570,8 +651,14 @@ repeatability, and latency can be measured honestly.
 - `scripts/prepare_identity_crops.py`: detector crop preparation.
 - `scripts/train_embedding.py`: identity embedding training.
 - `scripts/evaluate_identity_embeddings.py`: checkpoint pair/open-set evaluation.
-- `scripts/build_identity_gallery.py`: build the current FAISS identity gallery.
-- `scripts/test_identity_gallery.py`: disposable gallery identification smoke test.
+- `scripts/build_identity_gallery.py`: build the anatomy-feature identity gallery.
+- `scripts/test_identity_gallery.py`: disposable feature-gallery smoke test.
+- `scripts/register_directory.py`: batch-enroll per-dog registration folders.
+- `noseid/api/app.py`: FastAPI registration/identification service.
+- `frontend/`: browser registration and identification interface.
+- `run_frontend.py`: local Uvicorn entry point.
+- `noseid/embedding/features.py`: per-anatomy crops and shared embeddings.
+- `noseid/matching/feature_index.py`: per-feature template storage and matching.
 - `noseid/biometric.py`: pipeline construction and orchestration.
 - `noseid/pipeline/detection.py`: detector runtime wrapper.
 - `noseid/pipeline/segmentation.py`: anatomy runtime wrapper.

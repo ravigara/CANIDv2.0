@@ -1,11 +1,11 @@
 """End-to-end CLI for the Dog Nose Biometric ID System.
 
-Subcommands:
-  generate   build a synthetic dataset (Stage 1)
-  enroll     enroll a dog from a folder of images into the FAISS index (Stage 8)
-  identify   identify a dog from a single image (Stage 9)
-  demo       one-shot: generate a tiny dataset, enroll N dogs, run identification
-  evaluate   compute FAR/FRR/EER/AUC over a dataset (Stage 11)
+Active subcommands:
+  enroll     detect parts, create embeddings, and store one dog template
+  identify   detect parts, create an embedding, and search stored templates
+
+The generate/demo/evaluate commands remain available for development checks,
+but are not part of the registration or identification flow.
 
 Examples:
   python -m noseid.cli demo --dogs 12 --images 8
@@ -31,22 +31,23 @@ def _print_json(obj) -> None:
 def cmd_demo(args) -> int:
     """Generate -> enroll -> identify end-to-end on synthetic data."""
     from .data import NoseSynthGenerator
-    from .biometric import build_pipeline, GTHint, run_to_embedding, identify
-    from .matching import NoseIndex
+    from .biometric import build_pipeline, GTHint, run_to_feature_embeddings, identify
+    from .matching import FeatureIndex
 
     g = NoseSynthGenerator(256, seed=args.seed)
     pc = build_pipeline()
-    idx = NoseIndex(dim=256)
+    idx = FeatureIndex(dim=256)
     dogs = [f"dog_{i:03d}" for i in range(1, args.dogs + 1)]
     print(f"[*] enrolling {args.dogs} dogs ({args.images} images each)...")
     for did in dogs:
-        embs = []
+        embs = {}
         for i in range(args.images):
             s = g.render_labeled(did, i)
-            _, _, _, _, er = run_to_embedding(pc, s["image"],
-                                              GTHint.from_sample(s), did)
-            embs.append(np.asarray(er.embedding, dtype=np.float32))
-        idx.enroll(did, embs)
+            _, _, _, er = run_to_feature_embeddings(
+                pc, s["image"], GTHint.from_sample(s), did)
+            for name, vector in er.embeddings.items():
+                embs.setdefault(name, []).append(np.asarray(vector, dtype=np.float32))
+        idx.enroll(did, embs, num_images=args.images)
     print(f"[*] index size: {idx.size}")
 
     print("[*] identifying held-out genuine images...")
@@ -90,19 +91,19 @@ def _load_image_rgb(path: str) -> np.ndarray:
 
 
 def cmd_enroll(args) -> int:
-    from .biometric import build_pipeline, enroll_dog, GTHint
-    from .matching import NoseIndex
+    from .biometric import build_pipeline, enroll_dog, registration_response
+    from .matching import FeatureIndex, NoseIndex
     from .config import get_config
     idx_path = Path(args.index)
-    if (idx_path / "meta.json").exists():
+    if (idx_path / "feature_meta.json").exists():
+        idx = FeatureIndex.load(str(idx_path))
+    elif args.legacy and (idx_path / "meta.json").exists():
         idx = NoseIndex.load(str(idx_path))
     else:
-        idx = NoseIndex(dim=256)
+        idx = FeatureIndex(dim=256)
     overrides = {}
     if args.weights:
         overrides["embedding"] = {"weights": args.weights}
-    if args.strict_quality:
-        overrides["validation"] = {"hard_reject": True}
     cfg = get_config(overrides or None)
     pc = build_pipeline(cfg)
     d = Path(args.dir)
@@ -110,30 +111,47 @@ def cmd_enroll(args) -> int:
     if not files:
         print(f"[!] no images found in {d}", file=sys.stderr); return 1
     imgs = [_load_image_rgb(str(f)) for f in files]
-    res = enroll_dog(pc, idx, args.dog, imgs, min_valid=args.min_valid)
+    metadata = {}
+    if args.metadata:
+        try:
+            metadata = json.loads(args.metadata)
+        except json.JSONDecodeError as exc:
+            print(f"[!] --metadata must be valid JSON: {exc}", file=sys.stderr)
+            return 2
+    if args.name:
+        metadata["name"] = args.name
+    if args.breed:
+        metadata["breed"] = args.breed
+    res = enroll_dog(pc, idx, args.dog, imgs, min_valid=args.min_valid,
+                     metadata=metadata)
     idx.save(str(idx_path))
-    _print_json(res.to_dict())
+    _print_json(registration_response(res))
     return 0
 
 
 def cmd_identify(args) -> int:
-    from .biometric import build_pipeline, identify
-    from .matching import NoseIndex
+    from .biometric import build_pipeline, identify, identification_response
+    from .matching import FeatureIndex, NoseIndex
     from .config import get_config
-    idx = NoseIndex.load(args.index)
+    idx_path = Path(args.index)
+    if (idx_path / "feature_meta.json").exists():
+        idx = FeatureIndex.load(str(idx_path))
+    elif args.legacy and (idx_path / "meta.json").exists():
+        idx = NoseIndex.load(str(idx_path))
+    else:
+        raise FileNotFoundError(
+            f"feature gallery not found at {idx_path}; rebuild it with "
+            "scripts/build_identity_gallery.py, or pass --legacy for the old whole-nose gallery")
     overrides = {}
     if args.weights:
         overrides["embedding"] = {"weights": args.weights}
-    if args.strict_quality:
-        overrides["validation"] = {"hard_reject": True}
     cfg = get_config(overrides or None)
     pc = build_pipeline(cfg)
     img = _load_image_rgb(args.image)
     res, meta = identify(pc, idx, img)
-    output = res.to_dict()
-    if meta.get("validation_warning"):
-        output["validation_warning"] = meta["validation_warning"]
-        output["validation_scores"] = meta["validation"].get("scores", {})
+    output = identification_response(res, idx)
+    if args.debug:
+        output["pipeline"] = meta
     _print_json(output)
     return 0 if res.status != "Error" else 1
 
@@ -181,10 +199,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--dog", required=True)
     e.add_argument("--dir", required=True)
     e.add_argument("--min-valid", type=int, default=3)
+    e.add_argument("--name", default=None,
+                   help="optional registered dog name")
+    e.add_argument("--breed", default=None,
+                   help="optional registered dog breed")
+    e.add_argument("--metadata", default=None,
+                   help="optional JSON object stored with the dog template")
     e.add_argument("--weights", default=None,
                    help="optional embedding checkpoint")
-    e.add_argument("--strict-quality", action="store_true",
-                   help="reject images failing the quality gate")
+    e.add_argument("--legacy", action="store_true",
+                   help="use the old whole-nose FAISS gallery")
     e.set_defaults(func=cmd_enroll)
 
     i = sub.add_parser("identify", help="identify a dog (Stage 9)")
@@ -192,8 +216,10 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--image", required=True)
     i.add_argument("--weights", default=None,
                    help="optional embedding checkpoint")
-    i.add_argument("--strict-quality", action="store_true",
-                   help="reject images failing the quality gate")
+    i.add_argument("--debug", action="store_true",
+                   help="include detector, parts, and embedding diagnostics")
+    i.add_argument("--legacy", action="store_true",
+                   help="use the old whole-nose FAISS gallery")
     i.set_defaults(func=cmd_identify)
 
     v = sub.add_parser("evaluate", help="compute FAR/FRR/EER/AUC (Stage 11)")

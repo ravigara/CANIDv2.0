@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1220">
+    <title>Canine ID · Nose biometric registry</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Canine ID home">
+          <span class="brand-mark">◉</span>
+          <span><strong>Canine ID</strong><small>Nose biometric registry</small></span>
+        </a>
+        <div class="system-status" id="system-status"><span class="status-dot"></span>Checking model status…</div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Anatomy-feature matching</p>
+            <h1>Know the nose.<br><em>Find the dog.</em></h1>
+            <p class="hero-copy">Register a dog once, then identify it from a clear nose photo using separate rhinarium, nare and philtrum embeddings.</p>
+          </div>
+          <div class="hero-orbit" aria-hidden="true"><span class="orbit-ring ring-one"></span><span class="orbit-ring ring-two"></span><span class="orbit-core">N</span></div>
+        </section>
+
+        <nav class="mode-tabs" aria-label="Application mode">
+          <button class="mode-tab active" data-mode="identify">Identify a dog</button>
+          <button class="mode-tab" data-mode="register">Register a dog</button>
+        </nav>
+
+        <section class="workspace">
+          <div class="panel intro-panel">
+            <div class="panel-kicker" id="mode-kicker">IDENTIFICATION</div>
+            <h2 id="mode-title">Who is this dog?</h2>
+            <p id="mode-description">Upload one sharp, front-facing nose photo. The system checks the detected anatomy against the registered feature gallery.</p>
+            <div class="feature-list">
+              <div><span class="feature-icon">R</span><span><strong>Rhinarium</strong><small>Nose pad texture</small></span></div>
+              <div><span class="feature-icon">N</span><span><strong>Left + right nares</strong><small>Individual nostril patterns</small></span></div>
+              <div><span class="feature-icon">P</span><span><strong>Philtrum</strong><small>Central groove structure</small></span></div>
+            </div>
+            <p class="privacy-note">Images are processed locally by this app. Raw embeddings are never returned to the browser.</p>
+          </div>
+
+          <div class="panel action-panel">
+            <form id="identify-form" class="mode-form">
+              <label class="dropzone" for="identify-file">
+                <input id="identify-file" type="file" accept="image/*" capture="environment" required>
+                <span class="upload-glyph">↑</span>
+                <strong>Drop a nose photo here</strong>
+                <span>or tap to browse · JPG, PNG, WEBP</span>
+                <span class="file-name" id="identify-file-name">No photo selected</span>
+              </label>
+              <div class="preview-wrap hidden" id="identify-preview-wrap"><img id="identify-preview" alt="Selected identification photo"></div>
+              <button class="primary-button" type="submit"><span>Identify dog</span><span>→</span></button>
+            </form>
+
+            <form id="register-form" class="mode-form hidden">
+              <div class="form-grid">
+                <label>Dog name<input name="name" type="text" placeholder="e.g. Luna" required maxlength="80"></label>
+                <label>Dog ID <span class="optional">optional</span><input name="dog_id" type="text" placeholder="Auto-generated"></label>
+                <label>Identification chip ID <span class="optional">if any</span><input name="identification_chip_id" type="text" placeholder="e.g. 978000000000000"></label>
+                <label>Colour <span class="optional">optional</span><input name="colour" type="text" placeholder="e.g. Black and white"></label>
+                <label>Breed <span class="optional">optional</span><input name="breed" type="text" placeholder="e.g. Labrador"></label>
+                <label>Age <span class="optional">optional</span><input name="age" type="text" placeholder="e.g. 4 years"></label>
+                <label>Blood type <span class="optional">optional</span><input name="blood_type" type="text" placeholder="e.g. DEA 1.1+"></label>
+                <label>Owner name <span class="optional">optional</span><input name="owner_name" type="text" placeholder="Full name"></label>
+                <label>Owner phone <span class="optional">optional</span><input name="owner_phone" type="tel" placeholder="Phone number"></label>
+                <label>Owner email <span class="optional">optional</span><input name="owner_email" type="email" placeholder="Email address"></label>
+                <label class="wide-field">Owner address <span class="optional">optional</span><textarea name="owner_address" rows="2" placeholder="Address or other owner details"></textarea></label>
+              </div>
+              <label class="dropzone register-dropzone" for="register-files">
+                <input id="register-files" type="file" name="files" accept="image/*" multiple capture="environment" required>
+                <span class="upload-glyph">＋</span>
+                <strong>Add 3 or more nose photos</strong>
+                <span>Multiple angles and lighting improve the template</span>
+                <span class="file-name" id="register-file-name">No photos selected</span>
+              </label>
+              <div class="thumb-grid" id="register-previews"></div>
+              <button class="primary-button" type="submit"><span>Register dog</span><span>→</span></button>
+            </form>
+            <div class="busy hidden" id="busy"><span class="spinner"></span><span id="busy-text">Running detection and anatomy matching…</span></div>
+          </div>
+        </section>
+
+        <section class="result-section hidden" id="result-section" aria-live="polite">
+          <div class="result-heading"><div><p class="eyebrow">RESULT</p><h2 id="result-title">Identification result</h2></div><button class="text-button" id="clear-result" type="button">Clear</button></div>
+          <div id="result-content"></div>
+        </section>
+
+        <section class="registry-section" id="registry-section">
+          <div class="result-heading">
+            <div><p class="eyebrow">REGISTRY</p><h2>Registered dogs</h2></div>
+            <button class="text-button" id="refresh-dogs" type="button">Refresh</button>
+          </div>
+          <p class="registry-intro">Select a dog to view every photo saved in its registration profile.</p>
+          <div class="dog-grid" id="dog-grid"><div class="registry-loading">Loading registered dogs…</div></div>
+          <div class="dog-detail hidden" id="dog-detail"></div>
+        </section>
+      </main>
+
+      <footer><span>Canine ID · anatomy-feature gallery</span><span id="gallery-count">Gallery status loading…</span></footer>
+    </div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

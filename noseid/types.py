@@ -107,6 +107,10 @@ class EnrollmentResult(JSONMixin):
     num_images: int
     mean_confidence: float
     status: str = "Enrolled"
+    embedding_version: str = "unknown"
+    photos_processed: int = 0
+    photos_failed: int = 0
+    photo_errors: list[dict] = field(default_factory=list)
 
 
 @dataclass

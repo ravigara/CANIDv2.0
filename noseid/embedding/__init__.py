@@ -16,7 +16,13 @@ def __getattr__(name):  # PEP 562
     if name == "EmbeddingNet":
         from .model import EmbeddingNet  # raises if torch missing - intended
         return EmbeddingNet
+    if name in ("FeatureEmbedder", "FeatureEmbeddingResult", "FEATURE_NAMES"):
+        from .features import FeatureEmbedder, FeatureEmbeddingResult, FEATURE_NAMES
+        return {"FeatureEmbedder": FeatureEmbedder,
+                "FeatureEmbeddingResult": FeatureEmbeddingResult,
+                "FEATURE_NAMES": FEATURE_NAMES}[name]
     raise AttributeError(name)
 
 __all__ = ["ArcFaceLoss", "TripletLoss", "ContrastiveLoss", "CombinedMetricLoss",
-           "EmbeddingNet", "Embedder"]
+           "EmbeddingNet", "Embedder", "FeatureEmbedder",
+           "FeatureEmbeddingResult", "FEATURE_NAMES"]

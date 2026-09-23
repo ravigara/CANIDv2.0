@@ -282,6 +282,30 @@ class Embedder:
         return EmbeddingResult(dog_id=dog_id or "?", embedding=emb.tolist(),
                                embedding_size=emb.shape[0], source="numpy")
 
+    def embed_crop(self, crop: np.ndarray, dog_id: str | None = None) -> EmbeddingResult:
+        """Embed an already-normalized crop without applying anatomy again.
+
+        ``FeatureEmbedder`` calls this for each anatomical crop.  Keeping this
+        path separate from :meth:`embed` prevents a second detector-box
+        normalization from undoing the region crop.
+        """
+        if crop is None or not isinstance(crop, np.ndarray) or crop.size == 0:
+            raise ValueError("feature crop must be a non-empty numpy image")
+        if crop.ndim == 2:
+            crop = cv2.cvtColor(crop, cv2.COLOR_GRAY2RGB)
+        elif crop.ndim == 3 and crop.shape[2] == 4:
+            crop = crop[..., :3]
+        if crop.ndim != 3 or crop.shape[2] != 3:
+            raise ValueError("feature crop must have three color channels")
+        if self.backend == "torch" and self._net is not None:
+            emb = self._embed_raw_torch(crop)
+            source = "torch"
+        else:
+            emb = self._embed_raw_numpy(crop)
+            source = "numpy"
+        return EmbeddingResult(dog_id=dog_id or "?", embedding=emb.tolist(),
+                               embedding_size=emb.shape[0], source=source)
+
     __call__ = embed
 
     # -- backends ---------------------------------------------------------
@@ -290,14 +314,16 @@ class Embedder:
                      masks: np.ndarray | None = None,
                      classes: list[str] | None = None,
                      bbox: list[float] | None = None) -> np.ndarray:
-        import torch
         normalized = normalize_nose_crop(
             image, bbox, landmarks, masks, classes,
             target_size=self.crop_size, pad=self.crop_pad,
             min_confidence=self.landmark_min_confidence,
             mask_background=self.mask_background,
         )
-        rgb = normalized.image
+        return self._embed_raw_torch(normalized.image)
+
+    def _embed_raw_torch(self, rgb: np.ndarray) -> np.ndarray:
+        import torch
         input_size = int(cfg_get(self.cfg, "training.image_size", 224))
         rgb = cv2.resize(rgb, (input_size, input_size)) \
             if rgb.shape[:2] != (input_size, input_size) else rgb
@@ -308,6 +334,16 @@ class Embedder:
         with torch.no_grad():
             e = self._net.embed(t.unsqueeze(0))[0].cpu().numpy()
         return _l2(e.astype(np.float32))
+
+    def _embed_raw_numpy(self, crop: np.ndarray) -> np.ndarray:
+        """Embed a feature crop with the deterministic no-torch fallback."""
+        crop = cv2.resize(crop, (self.crop_size, self.crop_size),
+                          interpolation=cv2.INTER_AREA)
+        fv = self.fx.extract(crop)
+        fused = FeatureExtractor.fused_array(fv)
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        sig = _rhinarium_signature(gray, self.embed_dim)
+        return _l2(self.sig_blend * sig + (1 - self.sig_blend) * fused).astype(np.float32)
 
     def _embed_numpy(self, image: np.ndarray,
                      landmarks: LandmarkResult | None,
