@@ -92,15 +92,21 @@ def _load_image_rgb(path: str) -> np.ndarray:
 
 def cmd_enroll(args) -> int:
     from .biometric import build_pipeline, enroll_dog, registration_response
-    from .matching import FeatureIndex, NoseIndex
+    from .matching import (CascadeFeatureIndex, FeatureIndex,
+                           FullPhotoCascadeIndex, NoseIndex)
     from .config import get_config
     idx_path = Path(args.index)
-    if (idx_path / "feature_meta.json").exists():
+    if ((idx_path / "full_photo_cascade_meta.json").exists()
+            and not args.feature_only):
+        idx = FullPhotoCascadeIndex.load(str(idx_path))
+    elif (idx_path / "cascade_meta.json").exists() and not args.feature_only:
+        idx = CascadeFeatureIndex.load(str(idx_path))
+    elif (idx_path / "feature_meta.json").exists():
         idx = FeatureIndex.load(str(idx_path))
     elif args.legacy and (idx_path / "meta.json").exists():
         idx = NoseIndex.load(str(idx_path))
     else:
-        idx = FeatureIndex(dim=256)
+        idx = FeatureIndex(dim=256) if args.feature_only else FullPhotoCascadeIndex(dim=256)
     overrides = {}
     if args.weights:
         overrides["embedding"] = {"weights": args.weights}
@@ -131,17 +137,23 @@ def cmd_enroll(args) -> int:
 
 def cmd_identify(args) -> int:
     from .biometric import build_pipeline, identify, identification_response
-    from .matching import FeatureIndex, NoseIndex
+    from .matching import (CascadeFeatureIndex, FeatureIndex,
+                           FullPhotoCascadeIndex, NoseIndex)
     from .config import get_config
     idx_path = Path(args.index)
-    if (idx_path / "feature_meta.json").exists():
+    if ((idx_path / "full_photo_cascade_meta.json").exists()
+            and not args.feature_only):
+        idx = FullPhotoCascadeIndex.load(str(idx_path))
+    elif (idx_path / "cascade_meta.json").exists() and not args.feature_only:
+        idx = CascadeFeatureIndex.load(str(idx_path))
+    elif (idx_path / "feature_meta.json").exists():
         idx = FeatureIndex.load(str(idx_path))
     elif args.legacy and (idx_path / "meta.json").exists():
         idx = NoseIndex.load(str(idx_path))
     else:
         raise FileNotFoundError(
-            f"feature gallery not found at {idx_path}; rebuild it with "
-            "scripts/build_identity_gallery.py, or pass --legacy for the old whole-nose gallery")
+            f"cascade gallery not found at {idx_path}; build it with "
+            "scripts/build_cascade_gallery.py, or pass --feature-only / --legacy")
     overrides = {}
     if args.weights:
         overrides["embedding"] = {"weights": args.weights}
@@ -209,6 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="optional embedding checkpoint")
     e.add_argument("--legacy", action="store_true",
                    help="use the old whole-nose FAISS gallery")
+    e.add_argument("--feature-only", action="store_true",
+                   help="use the previous anatomy-only feature gallery")
     e.set_defaults(func=cmd_enroll)
 
     i = sub.add_parser("identify", help="identify a dog (Stage 9)")
@@ -220,6 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="include detector, parts, and embedding diagnostics")
     i.add_argument("--legacy", action="store_true",
                    help="use the old whole-nose FAISS gallery")
+    i.add_argument("--feature-only", action="store_true",
+                   help="use the previous anatomy-only feature gallery")
     i.set_defaults(func=cmd_identify)
 
     v = sub.add_parser("evaluate", help="compute FAR/FRR/EER/AUC (Stage 11)")

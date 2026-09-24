@@ -21,8 +21,10 @@ from .pipeline.detection import NoseDetector
 from .pipeline.landmarks import LandmarkDetector
 from .pipeline.segmentation import NoseSegmenter
 from .embedding import Embedder
+from .embedding.full_photo import FullPhotoEmbedder
 from .embedding.features import FeatureEmbedder, FeatureEmbeddingResult
-from .matching import FeatureIndex, NoseIndex
+from .matching import (CascadeFeatureIndex, FeatureIndex, FullPhotoCascadeIndex,
+                       NoseIndex)
 from .data.synth import CLASSES
 
 
@@ -33,6 +35,7 @@ class PipelineComponents:
     segmenter: NoseSegmenter
     embedder: Embedder
     feature_embedder: FeatureEmbedder
+    full_photo_embedder: FullPhotoEmbedder
 
 
 def build_pipeline(cfg: dict | None = None) -> PipelineComponents:
@@ -65,6 +68,7 @@ def build_pipeline(cfg: dict | None = None) -> PipelineComponents:
             device=seg_cfg.get("device", "auto")),
         embedder=embedder,
         feature_embedder=FeatureEmbedder(embedder, cfg),
+        full_photo_embedder=FullPhotoEmbedder(cfg),
     )
 
 
@@ -141,18 +145,79 @@ def run_to_feature_embeddings(
     return det, lm, seg, result
 
 
-def enroll_dog(pc: PipelineComponents, index: NoseIndex | FeatureIndex, dog_id: str,
+def run_to_cascade_embeddings(
+        pc: PipelineComponents, image: np.ndarray,
+        gt: GTHint | None = None, dog_id: str | None = None
+        ) -> tuple[DetectionResult, LandmarkResult | None,
+                   SegmentationResult, EmbeddingResult,
+                   FeatureEmbeddingResult]:
+    """Run anatomy once and return whole-nose plus region embeddings."""
+    det, lm, seg, bbox = _run_anatomy(pc, image, gt)
+    whole = pc.embedder.embed(
+        image, lm, seg.masks, seg.classes or CLASSES, bbox, dog_id)
+    features = pc.feature_embedder.embed(
+        image, lm, seg.masks, seg.classes or CLASSES, bbox, dog_id)
+    return det, lm, seg, whole, features
+
+
+def run_to_full_photo_cascade_embeddings(
+        pc: PipelineComponents, image: np.ndarray,
+        gt: GTHint | None = None, dog_id: str | None = None
+        ) -> tuple[DetectionResult, LandmarkResult | None,
+                   SegmentationResult, EmbeddingResult, EmbeddingResult,
+                   FeatureEmbeddingResult]:
+    """Run full-photo appearance plus the existing nose cascade once."""
+    # Compute the coarse full-frame signal first. It is intentionally based on
+    # the original photograph, before any detector crop or anatomy processing.
+    full_photo = pc.full_photo_embedder.embed(image, dog_id)
+    det, lm, seg, bbox = _run_anatomy(pc, image, gt)
+    whole = pc.embedder.embed(
+        image, lm, seg.masks, seg.classes or CLASSES, bbox, dog_id)
+    features = pc.feature_embedder.embed(
+        image, lm, seg.masks, seg.classes or CLASSES, bbox, dog_id)
+    return det, lm, seg, full_photo, whole, features
+
+
+def enroll_dog(pc: PipelineComponents,
+               index: NoseIndex | FeatureIndex | CascadeFeatureIndex |
+               FullPhotoCascadeIndex,
+               dog_id: str,
                samples: list[np.ndarray], gt_hints: list[GTHint] | None = None,
                min_valid: int = 5, metadata: dict | None = None) -> EnrollmentResult:
     """Embed valid registration photos and persist one dog template."""
     embs: list[np.ndarray] = []
+    whole_embs: list[np.ndarray] = []
+    photo_embs: list[np.ndarray] = []
     feature_embs: dict[str, list[np.ndarray]] = {}
     feature_images = 0
     errors: list[dict] = []
     for i, img in enumerate(samples):
         gt = gt_hints[i] if gt_hints else None
         try:
-            if isinstance(index, FeatureIndex):
+            if isinstance(index, FullPhotoCascadeIndex):
+                _, _, _, photo, whole, er = run_to_full_photo_cascade_embeddings(
+                    pc, img, gt, dog_id)
+                if len(er.embeddings) < index.min_features:
+                    raise ValueError(
+                        f"only {len(er.embeddings)} anatomical features detected")
+                photo_embs.append(np.asarray(photo.embedding, dtype=np.float32))
+                whole_embs.append(np.asarray(whole.embedding, dtype=np.float32))
+                for name, vector in er.embeddings.items():
+                    feature_embs.setdefault(name, []).append(
+                        np.asarray(vector, dtype=np.float32))
+                feature_images += 1
+            elif isinstance(index, CascadeFeatureIndex):
+                _, _, _, whole, er = run_to_cascade_embeddings(
+                    pc, img, gt, dog_id)
+                if len(er.embeddings) < index.min_features:
+                    raise ValueError(
+                        f"only {len(er.embeddings)} anatomical features detected")
+                whole_embs.append(np.asarray(whole.embedding, dtype=np.float32))
+                for name, vector in er.embeddings.items():
+                    feature_embs.setdefault(name, []).append(
+                        np.asarray(vector, dtype=np.float32))
+                feature_images += 1
+            elif isinstance(index, FeatureIndex):
                 _, _, _, er = run_to_feature_embeddings(pc, img, gt, dog_id)
                 if len(er.embeddings) < index.min_features:
                     raise ValueError(
@@ -169,11 +234,26 @@ def enroll_dog(pc: PipelineComponents, index: NoseIndex | FeatureIndex, dog_id: 
             errors.append({"photo": i + 1, "code": "PROCESSING_ERROR",
                            "message": str(exc)})
             continue
-    processed = feature_images if isinstance(index, FeatureIndex) else len(embs)
+    if isinstance(index, FullPhotoCascadeIndex):
+        processed = feature_images
+    elif isinstance(index, CascadeFeatureIndex):
+        processed = feature_images
+    elif isinstance(index, FeatureIndex):
+        processed = feature_images
+    else:
+        processed = len(embs)
     if processed < min_valid:
         raise ValueError(f"only {processed}/{len(samples)} valid images for {dog_id}; "
                          f"need >= {min_valid}")
-    if isinstance(index, FeatureIndex):
+    if isinstance(index, FullPhotoCascadeIndex):
+        result = index.enroll(
+            dog_id, photo_embs, whole_embs, feature_embs, metadata=metadata,
+            num_images=processed)
+    elif isinstance(index, CascadeFeatureIndex):
+        result = index.enroll(
+            dog_id, whole_embs, feature_embs, metadata=metadata,
+            num_images=processed)
+    elif isinstance(index, FeatureIndex):
         result = index.enroll(dog_id, feature_embs, metadata=metadata,
                               num_images=processed)
     else:
@@ -185,11 +265,19 @@ def enroll_dog(pc: PipelineComponents, index: NoseIndex | FeatureIndex, dog_id: 
     return result
 
 
-def identify(pc: PipelineComponents, index: NoseIndex | FeatureIndex, image: np.ndarray,
+def identify(pc: PipelineComponents,
+             index: NoseIndex | FeatureIndex | CascadeFeatureIndex |
+             FullPhotoCascadeIndex,
+             image: np.ndarray,
              gt: GTHint | None = None) -> tuple[IdentificationResult, dict]:
     """Identify one image against the persisted dog embedding templates."""
     try:
-        if isinstance(index, FeatureIndex):
+        if isinstance(index, FullPhotoCascadeIndex):
+            det, lm, seg, photo, whole, er = \
+                run_to_full_photo_cascade_embeddings(pc, image, gt)
+        elif isinstance(index, CascadeFeatureIndex):
+            det, lm, seg, whole, er = run_to_cascade_embeddings(pc, image, gt)
+        elif isinstance(index, FeatureIndex):
             det, lm, seg, er = run_to_feature_embeddings(pc, image, gt)
         else:
             vr, det, lm, seg, er = run_to_embedding(
@@ -199,7 +287,27 @@ def identify(pc: PipelineComponents, index: NoseIndex | FeatureIndex, image: np.
             dog_id=None, similarity=0.0, confidence=0.0,
             status="Rejected", candidates=[{"reason": "No nose detected"}]), \
             {"validation_warning": "No nose detected"}
-    if isinstance(index, FeatureIndex):
+    if isinstance(index, FullPhotoCascadeIndex):
+        res = index.identify(
+            np.asarray(photo.embedding, dtype=np.float32),
+            np.asarray(whole.embedding, dtype=np.float32),
+            {name: np.asarray(vector, dtype=np.float32)
+             for name, vector in er.embeddings.items()})
+        embedding_meta = {
+            "full_photo": photo.to_dict(),
+            "whole_nose": whole.to_dict(),
+            "features": er.to_dict(),
+        }
+    elif isinstance(index, CascadeFeatureIndex):
+        res = index.identify(
+            np.asarray(whole.embedding, dtype=np.float32),
+            {name: np.asarray(vector, dtype=np.float32)
+             for name, vector in er.embeddings.items()})
+        embedding_meta = {
+            "whole_nose": whole.to_dict(),
+            "features": er.to_dict(),
+        }
+    elif isinstance(index, FeatureIndex):
         res = index.identify({name: np.asarray(vector, dtype=np.float32)
                               for name, vector in er.embeddings.items()})
         embedding_meta = er.to_dict()
@@ -225,7 +333,8 @@ def registration_response(result: EnrollmentResult) -> dict:
 
 
 def identification_response(result: IdentificationResult,
-                            index: NoseIndex | FeatureIndex) -> dict:
+                            index: NoseIndex | FeatureIndex | CascadeFeatureIndex |
+                            FullPhotoCascadeIndex) -> dict:
     """Return a public, reference-style identification response.
 
     Only registration metadata supplied to ``NoseIndex.enroll`` is returned;

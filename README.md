@@ -1,9 +1,9 @@
 # Dog Nose Biometric Identifier
 
 A research-stage dog registration and identification pipeline. It detects the
-nose, identifies anatomical parts, creates one normalized embedding per
-detected nose feature, and stores those feature templates in a persistent
-local vector gallery.
+nose, creates a coarse embedding from the complete dog photograph, stores one
+normalized whole-nose embedding, and stores separate embeddings for each
+detected nose feature for final reranking.
 
 > This project is not a production biometric system. Detection, segmentation,
 > and landmark accuracy do not establish identity accuracy. Real deployment
@@ -14,17 +14,22 @@ local vector gallery.
 
 The registration and identification path is intentionally limited to:
 
-1. **Nose detection** finds the single `NOSE01` object.
-2. **Parts identification** runs anatomical segmentation and the three
+1. **Full-photo retrieval** creates a lightweight whole-frame appearance
+   vector and retrieves a broad candidate union. This is only a coarse signal.
+2. **Nose detection** finds the single `NOSE01` object.
+3. **Parts identification** runs anatomical segmentation and the three
    landmarks: `left_nare`, `right_nare`, and `philtrum`.
-3. **Feature embedding extraction** creates separate L2-normalized embeddings
-   for `rhinarium`, `left_nare`, `right_nare`, and `philtrum` with the existing
-   embedding checkpoint reused as a shared encoder.
-4. **Template storage/matching** averages each feature independently into a
-   dog template, stores the feature templates in
-  `output/index/feature_meta.json`, and applies weighted cosine similarity.
-  Identification selects the highest-confidence registered dog when its score
-  is strictly above 50%; the top-1/top-2 margin remains visible for review.
+4. **Embedding extraction** creates one whole-nose embedding plus separate
+   L2-normalized embeddings for `rhinarium`, `left_nare`, `right_nare`, and
+   `philtrum` with the existing embedding checkpoint reused as a shared
+   encoder.
+5. **Cascade matching** unions full-photo and whole-nose candidates, then
+   reranks them with weighted anatomical-feature similarity. The default final
+   weights are 0.15 full photo, 0.25 whole nose, and 0.60 anatomy; the final
+   candidate must score strictly above 50%.
+6. **Template storage** averages full-photo, whole-nose, and each feature
+   independently into a dog template and stores the active gallery in
+   `output/index/full_photo_cascade_meta.json`.
 
 Dataset generation, training, quality analysis, and biometric evaluation are
 separate development tools; they are not inserted into the active flow.
@@ -40,9 +45,9 @@ identification, and evaluation commands.
   two nare classes remain the main quality limitation.
 - The three-point landmark model is trained and integrated, with an OpenCV
   heuristic fallback.
-- Identity embeddings are stored as versioned per-feature centroid templates;
-  missing regions are omitted rather than fabricated. The current gallery
-  remains a development artifact.
+- Identity embeddings are stored as versioned whole-nose plus per-feature
+  centroid templates; missing regions are omitted rather than fabricated. The
+  current gallery remains a development artifact.
 - The current identity split has unseen dogs in validation/test rather than
   repeat sessions of training dogs, so generalization is not yet measured.
 
@@ -75,7 +80,7 @@ python -m noseid.cli demo --dogs 12 --images 8
 ```
 
 Register a dog from several images. The detector and anatomical models run on
-every image; only the averaged per-feature templates are persisted:
+every image; averaged whole-nose and per-feature templates are persisted:
 
 ```bash
 python -m noseid.cli enroll --index output/index --dog DOG_001 \
@@ -83,8 +88,8 @@ python -m noseid.cli enroll --index output/index --dog DOG_001 \
 python -m noseid.cli identify --index output/index --image photo.jpg
 ```
 
-Enrollment stores per-feature templates and metadata in
-`output/index/feature_meta.json`. Identification returns a
+Enrollment stores full-photo cascade templates and metadata in
+`output/index/full_photo_cascade_meta.json`. Identification returns a
 reference-style response:
 
 ```json
@@ -102,14 +107,18 @@ reference-style response:
 
 ## Browser application
 
-The local web app uses the same active anatomy-feature pipeline and gallery.
+The local web app uses full-photo candidate retrieval, whole-nose retrieval,
+and anatomy-feature reranking from the active gallery.
 It supports multi-photo registration and single-photo identification. A
 recognized result includes the registered dog name and profile photo; an
 unrecognized result includes ranked possible matches with confidence scores.
 The Registered dogs section lists every profile; clicking one opens all photos
 stored for that registration. Registration captures the dog name, optional
 identification chip ID, colour, breed, age, blood type, and owner name/contact
-details. A profile can be deleted from its detail view after confirmation.
+details. A profile can be deleted from its detail view after confirmation. The
+same profile view also accepts one or more current photos: the photos are
+appended to the local registry and the selected dog's full-photo, whole-nose,
+and anatomy templates are rebuilt from the retained historical and new images.
 
 Start it from the repository root:
 
@@ -119,10 +128,18 @@ python run_frontend.py
 
 Open <http://127.0.0.1:8000>. The first request loads the existing detector,
 segmentation, landmark, and embedding checkpoints. Registration saves the
-first submitted photo under the local registry and stores only the per-feature
-templates in `output/index/feature_meta.json`; it does not retrain anything.
+all submitted photos under the local registry and stores full-photo,
+whole-nose, and per-feature templates in
+`output/index/full_photo_cascade_meta.json`; it does not retrain anything.
+Set `NOSEID_GALLERY_MODE=cascade` to use the previous whole-nose
+cascade, or `NOSEID_GALLERY_MODE=feature` to use the earlier anatomy-only
+gallery without deleting the new artifacts.
 The service endpoints are `POST /api/register`, `POST /api/identify`,
-`GET /api/dogs`, `GET /api/dogs/{dog_id}`, and `GET /api/health`.
+`GET /api/dogs`, `GET /api/dogs/{dog_id}`, `DELETE /api/dogs/{dog_id}`,
+`POST /api/dogs/{dog_id}/images`, `POST /api/dogs/bulk-delete`, and
+`GET /api/health`. The Registered Dogs section supports selecting several
+profiles and deleting them in one action. Updating images does not retrain a
+model and does not modify the preserved `registration/` source folders.
 
 Run the required checks:
 
@@ -215,8 +232,14 @@ Validate the dataset and review anatomy-specific features before enrollment:
 
 ```bash
 python scripts/validate_identity_dataset.py --data identity_data
-python scripts/build_identity_gallery.py \
-  --source-data identity_data \
+python scripts/build_cascade_gallery.py \
+  --identity-source identity_data \
+  --registration-source registration \
+  --weights output/models/embedding_best.pt \
+  --output output/index --device 0
+python scripts/build_full_photo_gallery.py \
+  --identity-source identity_data \
+  --registration-source registration \
   --weights output/models/embedding_best.pt \
   --output output/index --device 0
 python scripts/test_identity_gallery.py \
@@ -227,6 +250,18 @@ python scripts/test_identity_gallery.py \
 # Register every dog folder in one model-loaded run:
 python scripts/register_directory.py \
   --source registration --index output/index --min-valid 3
+```
+
+The previous whole-nose cascade remains available at
+`output/index/cascade_meta.json`; the new full-photo gallery is reversible.
+The previous anatomy-only gallery remains available at
+`output/index/feature_meta.json`. Use `--feature-only` with the CLI, or set
+`NOSEID_GALLERY_MODE=feature` for the web service, to compare or roll back to
+that path:
+
+```powershell
+$env:NOSEID_GALLERY_MODE = "feature"
+python run_frontend.py
 ```
 
 The completed current run produced `output/models/embedding_best.pt`; it is
@@ -249,7 +284,7 @@ noseid/                  Runtime package and model components
   data/                  Synthetic data and dataset helpers
   embedding/             Shared embedding network, feature crops, and losses
   features/              Learned and classical feature extraction
-  matching/              Legacy FAISS and anatomy-feature enrollment/search
+  matching/              Legacy FAISS, feature-only, and cascade enrollment/search
   pipeline/              Validation, detection, landmarks, segmentation, crops
   training/              Training loop and biometric metrics
 config/default.yaml      Runtime paths and thresholds

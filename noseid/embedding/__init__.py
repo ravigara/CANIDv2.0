@@ -13,6 +13,9 @@ def __getattr__(name):  # PEP 562
     if name == "Embedder":
         from .model import Embedder
         return Embedder
+    if name == "FullPhotoEmbedder":
+        from .full_photo import FullPhotoEmbedder
+        return FullPhotoEmbedder
     if name == "EmbeddingNet":
         from .model import EmbeddingNet  # raises if torch missing - intended
         return EmbeddingNet
@@ -25,4 +28,4 @@ def __getattr__(name):  # PEP 562
 
 __all__ = ["ArcFaceLoss", "TripletLoss", "ContrastiveLoss", "CombinedMetricLoss",
            "EmbeddingNet", "Embedder", "FeatureEmbedder",
-           "FeatureEmbeddingResult", "FEATURE_NAMES"]
+           "FeatureEmbeddingResult", "FEATURE_NAMES", "FullPhotoEmbedder"]

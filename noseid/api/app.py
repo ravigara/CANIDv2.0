@@ -8,23 +8,27 @@ browser-friendly response shape.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import re
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from time import perf_counter
 
 import cv2
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import numpy as np
+from pydantic import BaseModel, Field
 
 from ..biometric import (build_pipeline, enroll_dog, identification_response,
                          identify, registration_response)
-from ..config import PROJECT_ROOT, get_config
-from ..matching import FeatureIndex
+from ..config import PROJECT_ROOT, cfg_get, get_config
+from ..matching import (CascadeFeatureIndex, FeatureIndex,
+                        FullPhotoCascadeIndex)
 
 
 FRONTEND_ROOT = PROJECT_ROOT / "frontend"
@@ -35,14 +39,21 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
+class BulkDeleteRequest(BaseModel):
+    """IDs selected for deletion from the active registry."""
+
+    dog_ids: list[str] = Field(min_length=1)
+
+
 @dataclass
 class _Runtime:
     pipeline: object
-    index: FeatureIndex
+    index: FeatureIndex | CascadeFeatureIndex | FullPhotoCascadeIndex
 
 
 _runtime: _Runtime | None = None
 _runtime_lock = threading.Lock()
+_mutation_lock = threading.Lock()
 
 
 def _runtime_or_error() -> _Runtime:
@@ -53,18 +64,37 @@ def _runtime_or_error() -> _Runtime:
     with _runtime_lock:
         if _runtime is not None:
             return _runtime
-        gallery = INDEX_ROOT / "feature_meta.json"
+        full_photo_gallery = INDEX_ROOT / "full_photo_cascade_meta.json"
+        cascade_gallery = INDEX_ROOT / "cascade_meta.json"
+        feature_gallery = INDEX_ROOT / "feature_meta.json"
+        gallery = (full_photo_gallery if full_photo_gallery.exists()
+                   else cascade_gallery if cascade_gallery.exists()
+                   else feature_gallery)
         if not gallery.exists():
             raise HTTPException(
                 status_code=503,
-                detail=("The anatomy-feature gallery is not available. Build "
-                        "output/index/feature_meta.json first."),
+                detail=("The identity gallery is not available. Build "
+                        "scripts/build_full_photo_gallery.py first."),
             )
         try:
             cfg = get_config()
+            gallery_mode = os.environ.get(
+                "NOSEID_GALLERY_MODE",
+                str(cfg_get(cfg, "matching.gallery_mode",
+                            "full_photo_cascade")),
+            ).lower()
+            if (full_photo_gallery.exists() and
+                    gallery_mode in ("full_photo", "full_photo_cascade")):
+                index = FullPhotoCascadeIndex.load(str(INDEX_ROOT))
+            elif cascade_gallery.exists() and gallery_mode != "feature":
+                index = CascadeFeatureIndex.load(str(INDEX_ROOT))
+            elif feature_gallery.exists():
+                index = FeatureIndex.load(str(INDEX_ROOT))
+            else:
+                raise FileNotFoundError("no compatible gallery file found")
             _runtime = _Runtime(
                 pipeline=build_pipeline(cfg),
-                index=FeatureIndex.load(str(INDEX_ROOT)),
+                index=index,
             )
             _backfill_legacy_registration_profiles(_runtime.index)
         except Exception as exc:
@@ -115,18 +145,112 @@ def _write_registry_jpeg(target: Path, image: np.ndarray) -> None:
     target.write_bytes(encoded.tobytes())
 
 
-def _save_registry_images(index_id: str, images: list[np.ndarray]) -> list[str]:
-    """Persist all enrollment images and return their public URLs."""
+def _save_registry_images(index_id: str, images: list[np.ndarray],
+                          start_number: int = 1,
+                          profile_image: np.ndarray | None = None) -> list[str]:
+    """Persist enrollment images and return their public URLs.
+
+    ``start_number`` is used by profile updates so existing registry photos
+    remain unchanged.  The profile photo is deliberately refreshed when a
+    caller supplies ``profile_image``; this keeps the visible profile current
+    while the complete historical image set remains available for matching.
+    """
     target_dir = REGISTRY_ROOT / index_id
     image_dir = target_dir / "images"
     urls = []
-    for number, image in enumerate(images, start=1):
+    for offset, image in enumerate(images):
+        number = start_number + offset
         filename = f"image_{number:03d}.jpg"
         _write_registry_jpeg(image_dir / filename, image)
         urls.append(f"/media/{index_id}/images/{filename}")
     if images:
-        _write_registry_jpeg(target_dir / "profile.jpg", images[0])
+        _write_registry_jpeg(
+            target_dir / "profile.jpg",
+            profile_image if profile_image is not None else images[0],
+        )
     return urls
+
+
+def _registry_image_files(index_id: str) -> list[Path]:
+    """Return direct-child registry image files in stable display order."""
+    if not _ID_RE.fullmatch(str(index_id)):
+        raise HTTPException(status_code=422, detail="Invalid dog ID.")
+    image_dir = (REGISTRY_ROOT / str(index_id) / "images").resolve()
+    registry_root = REGISTRY_ROOT.resolve()
+    if image_dir.parent != (registry_root / str(index_id)).resolve():
+        raise HTTPException(status_code=422, detail="Invalid registry path.")
+    if not image_dir.is_dir():
+        return []
+
+    def sort_key(path: Path) -> tuple[int, int | str]:
+        match = re.fullmatch(r"image_(\d+)", path.stem, re.IGNORECASE)
+        if match:
+            return (0, int(match.group(1)))
+        return (1, path.name.lower())
+
+    return sorted(
+        (path for path in image_dir.iterdir()
+         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS),
+        key=sort_key,
+    )
+
+
+def _read_registry_images(index_id: str) -> tuple[list[Path], list[np.ndarray]]:
+    """Read the usable historical registry photos for one dog."""
+    paths = _registry_image_files(index_id)
+    usable_paths: list[Path] = []
+    images: list[np.ndarray] = []
+    for path in paths:
+        image_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            continue
+        usable_paths.append(path)
+        images.append(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+    return usable_paths, images
+
+
+def _next_registry_image_number(index_id: str) -> int:
+    """Choose an image number that cannot overwrite an existing upload."""
+    numbers = []
+    for path in _registry_image_files(index_id):
+        match = re.fullmatch(r"image_(\d+)", path.stem, re.IGNORECASE)
+        if match:
+            numbers.append(int(match.group(1)))
+    return max(numbers, default=0) + 1
+
+
+def _gallery_filename(index: FeatureIndex) -> str:
+    if isinstance(index, FullPhotoCascadeIndex):
+        return "full_photo_cascade_meta.json"
+    if isinstance(index, CascadeFeatureIndex):
+        return "cascade_meta.json"
+    return "feature_meta.json"
+
+
+def _snapshot_index(index: FeatureIndex) -> Path:
+    """Save an in-process rollback copy without touching the active gallery."""
+    INDEX_ROOT.mkdir(parents=True, exist_ok=True)
+    snapshot = Path(tempfile.mkdtemp(prefix=".gallery-snapshot-", dir=str(INDEX_ROOT)))
+    try:
+        index.save(str(snapshot))
+        return snapshot
+    except Exception:
+        shutil.rmtree(snapshot, ignore_errors=True)
+        raise
+
+
+def _persist_index_atomically(index: FeatureIndex) -> None:
+    """Replace only the active gallery JSON after it has been fully written."""
+    INDEX_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".gallery-write-", dir=str(INDEX_ROOT)))
+    try:
+        index.save(str(temporary))
+        source = temporary / _gallery_filename(index)
+        if not source.is_file():
+            raise OSError(f"gallery save did not create {source.name}")
+        source.replace(INDEX_ROOT / source.name)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _backfill_legacy_registration_profiles(index: FeatureIndex) -> None:
@@ -216,6 +340,10 @@ def health() -> dict:
         "status": "ok",
         "gallery_size": runtime.index.size,
         "embedding_version": runtime.index.embedding_version,
+        "gallery_mode": (
+            "full_photo_cascade" if isinstance(runtime.index, FullPhotoCascadeIndex)
+            else "cascade" if isinstance(runtime.index, CascadeFeatureIndex)
+            else "feature"),
         "features": ["rhinarium", "left_nare", "right_nare", "philtrum"],
     }
 
@@ -236,6 +364,132 @@ def dog(dog_id: str) -> dict:
     return {"dog": _public_record(record)}
 
 
+@app.post("/api/dogs/{dog_id}/images")
+async def update_dog_images(
+    dog_id: str,
+    files: list[UploadFile] = File(..., description="One or more current dog photos"),
+    min_valid: int = Form(default=1),
+) -> dict:
+    """Append current photos and rebuild one dog's active identity template.
+
+    Historical registry photos are retained and reprocessed together with the
+    new photos.  This is important for age changes: the gallery learns from
+    the dog's current appearance without throwing away useful younger-nose
+    variation.
+    """
+    if not _ID_RE.fullmatch(dog_id):
+        raise HTTPException(status_code=422, detail="Invalid dog ID.")
+    if not files:
+        raise HTTPException(status_code=422, detail="Upload at least one photo.")
+    if not 1 <= min_valid <= 50:
+        raise HTTPException(status_code=422, detail="min_valid must be between 1 and 50.")
+
+    runtime = _runtime_or_error()
+    with _mutation_lock:
+        record = runtime.index.get_record(dog_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Registered dog not found.")
+
+        old_paths, old_images = _read_registry_images(dog_id)
+        new_images: list[np.ndarray] = []
+        for upload in files:
+            image, _ = await _decode_upload(upload)
+            new_images.append(image)
+        if not new_images:
+            raise HTTPException(status_code=422, detail="Upload at least one photo.")
+
+        all_images = old_images + new_images
+        existing_urls = [
+            f"/media/{dog_id}/images/{path.name}" for path in old_paths
+        ]
+        start_number = _next_registry_image_number(dog_id)
+        new_urls = [
+            f"/media/{dog_id}/images/image_{start_number + offset:03d}.jpg"
+            for offset in range(len(new_images))
+        ]
+        metadata = dict(record.get("metadata", {}) or {})
+        metadata["photo_urls"] = existing_urls + new_urls
+        metadata["photo_url"] = new_urls[0]
+
+        snapshot = _snapshot_index(runtime.index)
+        written_paths = [
+            REGISTRY_ROOT / dog_id / "images" / f"image_{start_number + offset:03d}.jpg"
+            for offset in range(len(new_images))
+        ]
+        profile_path = REGISTRY_ROOT / dog_id / "profile.jpg"
+        profile_existed = profile_path.is_file()
+        profile_bytes = profile_path.read_bytes() if profile_existed else None
+        try:
+            enrolled = enroll_dog(
+                runtime.pipeline, runtime.index, dog_id, all_images,
+                min_valid=min_valid, metadata=metadata,
+            )
+            old_count = len(old_images)
+            failed_new = {
+                int(error.get("photo"))
+                for error in enrolled.photo_errors
+                if isinstance(error.get("photo"), int)
+                and int(error["photo"]) > old_count
+            }
+            new_processed = len(new_images) - len(failed_new)
+            if new_processed < 1:
+                raise ValueError("None of the new photos contained a usable dog nose.")
+
+            _save_registry_images(
+                dog_id, new_images, start_number=start_number,
+                profile_image=new_images[0],
+            )
+            _persist_index_atomically(runtime.index)
+        except ValueError as exc:
+            runtime.index = runtime.index.__class__.load(str(snapshot))
+            for path in written_paths:
+                if path.is_file():
+                    path.unlink()
+            if profile_existed and profile_bytes is not None:
+                profile_path.write_bytes(profile_bytes)
+            elif profile_path.is_file():
+                profile_path.unlink()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except HTTPException:
+            runtime.index = runtime.index.__class__.load(str(snapshot))
+            for path in written_paths:
+                if path.is_file():
+                    path.unlink()
+            if profile_existed and profile_bytes is not None:
+                profile_path.write_bytes(profile_bytes)
+            elif profile_path.is_file():
+                profile_path.unlink()
+            raise
+        except Exception as exc:
+            runtime.index = runtime.index.__class__.load(str(snapshot))
+            for path in written_paths:
+                if path.is_file():
+                    path.unlink()
+            if profile_existed and profile_bytes is not None:
+                profile_path.write_bytes(profile_bytes)
+            elif profile_path.is_file():
+                profile_path.unlink()
+            raise HTTPException(status_code=500, detail=f"Image update failed: {exc}") from exc
+        finally:
+            shutil.rmtree(snapshot, ignore_errors=True)
+
+        updated = runtime.index.get_record(dog_id) or record
+        response = registration_response(enrolled)
+        response.update({
+            "status": "updated",
+            "message": (
+                f"{metadata.get('name') or dog_id} was updated with "
+                f"{new_processed} current photo(s)."
+            ),
+            "new_photos": len(new_images),
+            "new_photos_processed": new_processed,
+            "total_photos": len(metadata["photo_urls"]),
+            "dog": _public_record(updated),
+            "gallery_size": runtime.index.size,
+        })
+        return response
+
+
 @app.delete("/api/dogs/{dog_id}")
 def delete_dog(dog_id: str) -> dict:
     """Delete an active dog profile and its locally stored registry photos."""
@@ -251,16 +505,59 @@ def delete_dog(dog_id: str) -> dict:
     target = (REGISTRY_ROOT / dog_id).resolve()
     if target.parent != registry_root:
         raise HTTPException(status_code=422, detail="Invalid registry path.")
-    deleted = runtime.index.delete(dog_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Registered dog not found.")
-    runtime.index.save(str(INDEX_ROOT))
-    if target.is_dir():
-        shutil.rmtree(target)
+    with _mutation_lock:
+        deleted = runtime.index.delete(dog_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Registered dog not found.")
+        runtime.index.save(str(INDEX_ROOT))
+        if target.is_dir():
+            shutil.rmtree(target)
     return {
         "status": "deleted",
         "dog_id": dog_id,
         "message": "The active dog profile and registry photos were deleted.",
+    }
+
+
+@app.post("/api/dogs/bulk-delete")
+def delete_dogs_bulk(payload: BulkDeleteRequest = Body(...)) -> dict:
+    """Delete several active dog profiles atomically after path validation."""
+    runtime = _runtime_or_error()
+    dog_ids = list(dict.fromkeys(str(dog_id).strip()
+                                for dog_id in payload.dog_ids))
+    if not dog_ids or any(not _ID_RE.fullmatch(dog_id) for dog_id in dog_ids):
+        raise HTTPException(status_code=422, detail="Every dog ID is invalid.")
+
+    missing = [dog_id for dog_id in dog_ids
+               if runtime.index.get_record(dog_id) is None]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Registered dog(s) not found: {', '.join(missing)}",
+        )
+
+    registry_root = REGISTRY_ROOT.resolve()
+    targets = []
+    for dog_id in dog_ids:
+        target = (REGISTRY_ROOT / dog_id).resolve()
+        if target.parent != registry_root:
+            raise HTTPException(status_code=422, detail="Invalid registry path.")
+        targets.append(target)
+
+    with _mutation_lock:
+        for dog_id in dog_ids:
+            if not runtime.index.delete(dog_id):
+                raise HTTPException(status_code=404, detail="Registered dog not found.")
+        runtime.index.save(str(INDEX_ROOT))
+        for target in targets:
+            if target.is_dir():
+                shutil.rmtree(target)
+    return {
+        "status": "deleted",
+        "deleted_count": len(dog_ids),
+        "dog_ids": dog_ids,
+        "message": ("The selected active dog profiles and registry photos were "
+                     "deleted. Original source folders were not changed."),
     }
 
 
@@ -317,12 +614,13 @@ async def register(
         "photo_urls": photo_urls,
     }
     try:
-        enrolled = enroll_dog(
-            runtime.pipeline, runtime.index, resolved_id, images,
-            min_valid=min_valid, metadata=metadata,
-        )
-        _save_registry_images(resolved_id, images)
-        runtime.index.save(str(INDEX_ROOT))
+        with _mutation_lock:
+            enrolled = enroll_dog(
+                runtime.pipeline, runtime.index, resolved_id, images,
+                min_valid=min_valid, metadata=metadata,
+            )
+            _save_registry_images(resolved_id, images)
+            runtime.index.save(str(INDEX_ROOT))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except HTTPException:

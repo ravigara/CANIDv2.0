@@ -1,4 +1,7 @@
-const state = { mode: "identify", identifyFile: null, registerFiles: [] };
+const state = {
+  mode: "identify", identifyFile: null, registerFiles: [],
+  registryDogs: [], selectedDogIds: new Set(),
+};
 
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -90,7 +93,7 @@ function renderIdentification(data) {
   </div>`);
 }
 
-function renderDogRegistry(dogs) {
+function renderDogRegistryLegacy(dogs) {
   const grid = $("#dog-grid");
   if (!dogs.length) {
     grid.innerHTML = `<div class="registry-empty">No registered dogs yet. Register a dog above to create the first profile.</div>`;
@@ -107,6 +110,61 @@ function renderDogRegistry(dogs) {
       if (dog) showDogDetail(dog);
     });
   });
+}
+
+function renderDogRegistry(dogs) {
+  state.registryDogs = dogs;
+  const knownIds = new Set(dogs.map((dog) => dog.dog_id));
+  state.selectedDogIds = new Set([...state.selectedDogIds].filter((id) => knownIds.has(id)));
+  const grid = $("#dog-grid");
+  const tools = $("#registry-tools");
+  if (!dogs.length) {
+    tools.classList.add("hidden");
+    grid.innerHTML = `<div class="registry-empty">No registered dogs yet. Register a dog above to create the first profile.</div>`;
+    updateBulkControls();
+    return;
+  }
+  tools.classList.remove("hidden");
+  grid.innerHTML = dogs.map((dog) => `
+    <article class="dog-card" data-dog-id="${esc(dog.dog_id)}">
+      <label class="dog-select" title="Select ${esc(dog.name || dog.dog_id)}">
+        <input class="dog-select-checkbox" type="checkbox" data-dog-id="${esc(dog.dog_id)}"${state.selectedDogIds.has(dog.dog_id) ? " checked" : ""}>
+        <span>Select</span>
+      </label>
+      <button class="dog-card-open" type="button">
+        ${photoMarkup(dog.photo_url, dog.name, "dog-card-photo")}
+        <span class="dog-card-body"><strong>${esc(dog.name || dog.dog_id)}</strong><small>${esc(dog.breed || dog.dog_id)} · ${esc(dog.image_count || 0)} photos</small></span>
+      </button>
+    </article>`).join("");
+  grid.querySelectorAll(".dog-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", (event) => {
+      const id = event.currentTarget.dataset.dogId;
+      if (event.currentTarget.checked) state.selectedDogIds.add(id);
+      else state.selectedDogIds.delete(id);
+      updateBulkControls();
+    });
+  });
+  grid.querySelectorAll(".dog-card-open").forEach((button) => {
+    button.addEventListener("click", () => {
+      const card = button.closest(".dog-card");
+      const dog = dogs.find((item) => item.dog_id === card.dataset.dogId);
+      if (dog) showDogDetail(dog);
+    });
+  });
+  updateBulkControls();
+}
+
+function updateBulkControls() {
+  const dogs = state.registryDogs;
+  const selected = state.selectedDogIds.size;
+  const selectAll = $("#select-all-dogs");
+  const deleteButton = $("#delete-selected-dogs");
+  if (!selectAll || !deleteButton) return;
+  selectAll.checked = dogs.length > 0 && selected === dogs.length;
+  selectAll.indeterminate = selected > 0 && selected < dogs.length;
+  selectAll.disabled = !dogs.length;
+  deleteButton.disabled = selected === 0;
+  $("#selection-count").textContent = `${selected} selected`;
 }
 
 function showDogDetail(dog) {
@@ -133,12 +191,54 @@ function showDogDetail(dog) {
   detail.innerHTML = `
     <div class="dog-detail-header">
       <div><h3>${esc(dog.name || dog.dog_id)}</h3><p>${esc(dog.breed || "Registered profile")} · ID ${esc(dog.dog_id)} · ${esc(images.length)} photos</p></div>
-      <div class="dog-detail-actions"><button class="dog-detail-delete" type="button">Delete dog</button><button class="dog-detail-close" type="button">Close</button></div>
-    </div>${metadataMarkup}${ownerMarkup}${imageMarkup}`;
+      <div class="dog-detail-actions"><button class="dog-detail-update" type="button">Update images</button><button class="dog-detail-delete" type="button">Delete dog</button><button class="dog-detail-close" type="button">Close</button></div>
+    </div>${metadataMarkup}${ownerMarkup}
+    <form class="dog-update-form">
+      <p class="eyebrow">UPDATE IDENTITY IMAGES</p>
+      <p class="dog-update-copy">Add one or more clear photos of this dog’s current nose. Existing registration photos stay in the profile while the identity template is rebuilt from the full set.</p>
+      <label class="dog-update-dropzone" for="dog-update-files">
+        <input id="dog-update-files" name="files" type="file" accept="image/*" multiple capture="environment" required>
+        <span class="upload-glyph">＋</span>
+        <strong>Add current nose photos</strong>
+        <span>Use a few angles and lighting conditions when possible</span>
+        <span class="file-name">No new photos selected</span>
+      </label>
+      <button class="secondary-button" type="submit">Update identity images <span>→</span></button>
+    </form>
+    ${imageMarkup}`;
   detail.classList.remove("hidden");
   detail.querySelector(".dog-detail-close").addEventListener("click", () => detail.classList.add("hidden"));
   detail.querySelector(".dog-detail-delete").addEventListener("click", () => deleteDog(dog));
+  detail.querySelector(".dog-detail-update").addEventListener("click", () => {
+    detail.querySelector(".dog-update-form").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+  detail.querySelector(".dog-update-form").addEventListener("submit", (event) => updateDogImages(event, dog));
+  detail.querySelector("#dog-update-files").addEventListener("change", (event) => {
+    const files = [...event.currentTarget.files];
+    event.currentTarget.closest("label").querySelector(".file-name").textContent = files.length
+      ? `${files.length} new photo${files.length === 1 ? "" : "s"} selected`
+      : "No new photos selected";
+  });
   detail.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function updateDogImages(event, dog) {
+  event.preventDefault();
+  const files = [...event.currentTarget.querySelector("input[type=file]").files];
+  if (!files.length) return renderError("Choose at least one current photo first.");
+  setBusy(true, "Rebuilding this dog’s identity template from the updated photos…");
+  try {
+    const form = new FormData(event.currentTarget);
+    const response = await parseResponse(await fetch(`/api/dogs/${encodeURIComponent(dog.dog_id)}/images`, {
+      method: "POST", body: form,
+    }));
+    showResult("Dog images updated", `<div class="empty-result success-result">${esc(response.message || "The dog’s identity images were updated.")} The next identification will use the updated template.</div>`);
+    await refreshStatus();
+    await refreshDogs();
+    const updatedDog = state.registryDogs.find((item) => item.dog_id === dog.dog_id);
+    if (updatedDog) showDogDetail(updatedDog);
+  } catch (error) { renderError(error.message); }
+  finally { setBusy(false); }
 }
 
 async function deleteDog(dog) {
@@ -147,6 +247,7 @@ async function deleteDog(dog) {
   setBusy(true, "Deleting the registered profile…");
   try {
     await parseResponse(await fetch(`/api/dogs/${encodeURIComponent(dog.dog_id)}`, { method: "DELETE" }));
+    state.selectedDogIds.delete(dog.dog_id);
     $("#dog-detail").classList.add("hidden");
     showResult("Dog deleted", `<div class="empty-result">${esc(name)} and its active registry photos were deleted. Original source folders were not changed.</div>`);
     await refreshStatus();
@@ -155,12 +256,36 @@ async function deleteDog(dog) {
   finally { setBusy(false); }
 }
 
+async function deleteSelectedDogs() {
+  const selected = state.registryDogs.filter((dog) => state.selectedDogIds.has(dog.dog_id));
+  if (!selected.length) return;
+  const names = selected.map((dog) => dog.name || dog.dog_id).join(", ");
+  if (!window.confirm(`Delete ${selected.length} selected dog${selected.length === 1 ? "" : "s"} (${names}) from the active registry? Their stored registry photos will also be deleted.`)) return;
+  setBusy(true, `Deleting ${selected.length} registered profiles…`);
+  try {
+    const response = await parseResponse(await fetch("/api/dogs/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dog_ids: selected.map((dog) => dog.dog_id) }),
+    }));
+    state.selectedDogIds.clear();
+    $("#dog-detail").classList.add("hidden");
+    showResult("Dogs deleted", `<div class="empty-result">${esc(response.deleted_count)} selected profiles and their active registry photos were deleted. Original source folders were not changed.</div>`);
+    await refreshStatus();
+    await refreshDogs();
+  } catch (error) { renderError(error.message); }
+  finally { setBusy(false); updateBulkControls(); }
+}
+
 async function refreshDogs() {
   try {
     const data = await parseResponse(await fetch("/api/dogs"));
     renderDogRegistry(data.dogs || []);
   } catch (error) {
+    state.registryDogs = [];
+    state.selectedDogIds.clear();
     $("#dog-grid").innerHTML = `<div class="registry-empty">${esc(error.message)}</div>`;
+    updateBulkControls();
   }
 }
 
@@ -240,6 +365,13 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#register-form").addEventListener("submit", submitRegister);
   $("#clear-result").addEventListener("click", () => $("#result-section").classList.add("hidden"));
   $("#refresh-dogs").addEventListener("click", refreshDogs);
+  $("#select-all-dogs").addEventListener("change", (event) => {
+    state.selectedDogIds = event.currentTarget.checked
+      ? new Set(state.registryDogs.map((dog) => dog.dog_id))
+      : new Set();
+    renderDogRegistry(state.registryDogs);
+  });
+  $("#delete-selected-dogs").addEventListener("click", deleteSelectedDogs);
   refreshStatus();
   refreshDogs();
 });

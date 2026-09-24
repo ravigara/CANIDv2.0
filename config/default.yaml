@@ -24,12 +24,19 @@ embedding:
   same_dog_min: 0.90
   different_dog_max: 0.70
 
+# Full photographs are used only for coarse candidate retrieval. This frozen
+# path does not require training or a second identity checkpoint.
+full_photo:
+  backend: hybrid_numpy
+  dim: 256
+
 # Identification thresholds (Stages 8/9)
 matching:
+  gallery_mode: full_photo_cascade # full_photo_cascade | cascade | feature
   verify_threshold: 0.50     # accept the top candidate only above 50%
   reject_threshold: 0.20     # <  -> Unknown Dog
   margin_threshold: 0.00     # top candidate wins when it clears the threshold
-  embedding_version: noseid-v2-anatomy-features
+  embedding_version: noseid-v4-full-photo-cascade
   # Scores are averaged only over features present in both query and gallery.
   feature_weights:
     rhinarium: 1.0
@@ -37,6 +44,11 @@ matching:
     right_nare: 1.0
     philtrum: 0.8
   min_features: 2
+  # Whole-nose vectors retrieve candidates; anatomy vectors rerank them.
+  cascade_retrieval_k: 50
+  cascade_photo_weight: 0.15    # coarse full-frame appearance signal
+  cascade_whole_weight: 0.25    # coarse whole-nose signal
+  cascade_feature_weight: 0.60  # final anatomy-specific signal
   max_distance: 0.30         # euclidean equivalent used by FAISS L2
   top_k: 5
 

@@ -23,6 +23,8 @@ def test_default_config_points_to_trained_runtime_models():
     assert cfg["segmentation"]["backend"] == "torch"
     assert cfg["segmentation"]["weights"] == (
         "output/models/segmentation_retrained/segmentation_best")
+    assert cfg["matching"]["gallery_mode"] == "full_photo_cascade"
+    assert cfg["matching"]["cascade_photo_weight"] == pytest.approx(0.15)
 
 
 def test_trained_runtime_artifacts_exist():
@@ -274,6 +276,162 @@ def test_feature_index_delete_removes_template_and_metadata():
     assert idx.size == 0
     assert idx.get_record("dog_a") is None
     assert idx.delete("dog_a") is False
+
+
+def test_cascade_index_retrieves_whole_nose_then_reranks_features(tmp_path):
+    from noseid.matching import CascadeFeatureIndex
+
+    cfg = {"matching": {
+        "verify_threshold": 0.50,
+        "margin_threshold": 0.00,
+        "min_features": 2,
+        "cascade_retrieval_k": 2,
+        "cascade_whole_weight": 0.25,
+        "cascade_feature_weight": 0.75,
+    }}
+    idx = CascadeFeatureIndex(dim=4, cfg=cfg)
+    dog_a = {name: np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+             for name in ("rhinarium", "left_nare")}
+    dog_b = {name: np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+             for name in ("rhinarium", "left_nare")}
+    idx.enroll("dog_a", np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32), dog_a)
+    idx.enroll("dog_b", np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32), dog_b)
+
+    result = idx.identify(
+        np.asarray([0.8, 0.6, 0.0, 0.0], dtype=np.float32), dog_b)
+    assert result.status == "Verified"
+    assert result.dog_id == "dog_b"
+    assert result.candidates[0]["whole_nose_similarity"] < 1.0
+    assert result.candidates[0]["feature_similarity"] == pytest.approx(1.0)
+
+    idx.save(str(tmp_path))
+    loaded = CascadeFeatureIndex.load(str(tmp_path))
+    assert loaded.identify(
+        np.asarray([0.8, 0.6, 0.0, 0.0], dtype=np.float32), dog_b).dog_id == "dog_b"
+
+
+def test_full_photo_cascade_unions_photo_and_nose_candidates(tmp_path):
+    from noseid.matching import FullPhotoCascadeIndex
+
+    cfg = {"matching": {
+        "verify_threshold": 0.50,
+        "margin_threshold": 0.00,
+        "min_features": 2,
+        "cascade_retrieval_k": 1,
+        "cascade_photo_weight": 0.15,
+        "cascade_whole_weight": 0.25,
+        "cascade_feature_weight": 0.60,
+    }}
+    idx = FullPhotoCascadeIndex(dim=4, cfg=cfg)
+    features_a = {name: np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+                  for name in ("rhinarium", "left_nare")}
+    features_b = {name: np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+                  for name in ("rhinarium", "left_nare")}
+    idx.enroll("dog_a", [np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)],
+               [np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)], features_a)
+    idx.enroll("dog_b", [np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32)],
+               [np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32)], features_b)
+
+    # Photo retrieval points to dog_a, nose retrieval points to dog_b. The
+    # candidate union keeps both available for anatomy reranking.
+    result = idx.identify(
+        np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        features_b)
+    assert result.status == "Verified"
+    assert result.dog_id == "dog_b"
+    assert {row["dog_id"] for row in result.candidates} == {"dog_a", "dog_b"}
+    assert "full_photo_similarity" in result.candidates[0]
+    idx.save(str(tmp_path))
+    loaded = FullPhotoCascadeIndex.load(str(tmp_path))
+    assert loaded.identify(
+        np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32),
+        features_b).dog_id == "dog_b"
+
+
+def test_profile_image_update_appends_photos_and_rebuilds_active_template(
+        tmp_path, monkeypatch):
+    import asyncio
+    from io import BytesIO
+
+    import cv2
+    from fastapi import UploadFile
+
+    import noseid.api.app as api_module
+    from noseid.matching import FullPhotoCascadeIndex
+
+    cfg = {"matching": {
+        "verify_threshold": 0.50,
+        "margin_threshold": 0.00,
+        "min_features": 2,
+        "cascade_retrieval_k": 2,
+        "cascade_photo_weight": 0.15,
+        "cascade_whole_weight": 0.25,
+        "cascade_feature_weight": 0.60,
+    }}
+    index = FullPhotoCascadeIndex(dim=4, cfg=cfg)
+    old_vector = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    new_vector = np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    old_features = {
+        name: [old_vector] for name in ("rhinarium", "left_nare")
+    }
+    index.enroll(
+        "dog_a", [old_vector], [old_vector], old_features,
+        metadata={"name": "Rex"}, num_images=1)
+
+    registry_root = tmp_path / "registry"
+    index_root = tmp_path / "index"
+    monkeypatch.setattr(api_module, "REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api_module, "INDEX_ROOT", index_root)
+    monkeypatch.setattr(
+        api_module, "_runtime", api_module._Runtime(object(), index))
+    api_module._save_registry_images(
+        "dog_a", [np.full((24, 24, 3), 40, dtype=np.uint8)])
+
+    def fake_enroll(pipeline, active_index, dog_id, samples, min_valid,
+                    metadata=None):
+        assert len(samples) == 2  # retained historical photo + current photo
+        return active_index.enroll(
+            dog_id, [old_vector, new_vector], [old_vector, new_vector],
+            {name: [old_vector, new_vector]
+             for name in ("rhinarium", "left_nare")},
+            metadata=metadata, num_images=2)
+
+    monkeypatch.setattr(api_module, "enroll_dog", fake_enroll)
+    current = np.full((24, 24, 3), 180, dtype=np.uint8)
+    ok, encoded = cv2.imencode(
+        ".jpg", cv2.cvtColor(current, cv2.COLOR_RGB2BGR))
+    assert ok
+    upload = UploadFile(file=BytesIO(encoded.tobytes()), filename="current.jpg")
+
+    response = asyncio.run(api_module.update_dog_images(
+        "dog_a", [upload], min_valid=1))
+
+    assert response["status"] == "updated"
+    assert response["new_photos_processed"] == 1
+    assert response["total_photos"] == 2
+    assert (registry_root / "dog_a" / "images" / "image_002.jpg").is_file()
+    assert len(response["dog"]["photo_urls"]) == 2
+
+    loaded = FullPhotoCascadeIndex.load(str(index_root))
+    assert loaded.get_record("dog_a")["num_images"] == 2
+    assert loaded.get_record("dog_a")["metadata"]["name"] == "Rex"
+    assert loaded.identify(
+        new_vector, new_vector,
+        {name: new_vector for name in ("rhinarium", "left_nare")},
+    ).dog_id == "dog_a"
+
+
+def test_full_photo_embedder_uses_complete_image_without_nose_crop():
+    from noseid.embedding import FullPhotoEmbedder
+
+    g = NoseSynthGenerator(128, seed=2)
+    image = g.render_labeled("dog_001", 0)["image"]
+    result = FullPhotoEmbedder({"full_photo": {"dim": 32}}).embed(image)
+    assert result.embedding_size == 32
+    assert abs(float(np.linalg.norm(result.embedding)) - 1.0) < 1e-3
+    assert result.source == "full_photo_fast"
 
 
 # ---------- Stage 8/9: FAISS matching ---------------------------------------

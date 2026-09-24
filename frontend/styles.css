@@ -117,9 +117,19 @@ label input:focus, label textarea:focus { border-color: var(--blue); box-shadow:
 .empty-result, .error-result { padding: 24px; border: 1px solid #f0d1d1; border-radius: 13px; color: var(--red); background: #fff8f8; font-size: 12px; }
 .registry-section { margin-top: 54px; padding-top: 34px; border-top: 1px solid var(--line); }
 .registry-intro { margin: -7px 0 18px; color: var(--muted); font-size: 12px; }
+.registry-tools { display: flex; align-items: center; gap: 12px; margin: -5px 0 16px; }
+.select-all-dogs, .dog-select { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 750; }
+.select-all-dogs input, .dog-select input { accent-color: var(--blue); }
+.selection-count { color: var(--muted); font-size: 10px; }
+.bulk-delete-button { margin-left: auto; padding: 8px 11px; border: 1px solid #f0caca; border-radius: 7px; color: var(--red); background: white; font-size: 10px; font-weight: 750; }
+.bulk-delete-button:hover:not(:disabled) { background: #fff5f5; }
+.bulk-delete-button:disabled { cursor: not-allowed; opacity: .45; }
 .dog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
-.dog-card { display: flex; min-width: 0; flex-direction: column; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; color: var(--ink); background: white; text-align: left; box-shadow: 0 8px 24px rgba(21,34,56,.05); transition: border-color .15s, box-shadow .15s, transform .15s; }
-.dog-card:hover, .dog-card:focus-visible { border-color: var(--blue); box-shadow: 0 12px 26px rgba(47,111,237,.13); outline: none; transform: translateY(-2px); }
+.dog-card { position: relative; display: flex; min-width: 0; flex-direction: column; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 13px; color: var(--ink); background: white; text-align: left; box-shadow: 0 8px 24px rgba(21,34,56,.05); transition: border-color .15s, box-shadow .15s, transform .15s; }
+.dog-card:hover, .dog-card:focus-within { border-color: var(--blue); box-shadow: 0 12px 26px rgba(47,111,237,.13); outline: none; transform: translateY(-2px); }
+.dog-card-open { display: flex; width: 100%; flex-direction: column; padding: 0; border: 0; color: var(--ink); background: transparent; text-align: left; }
+.dog-card-open:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.dog-select { position: absolute; top: 8px; left: 8px; z-index: 1; padding: 5px 7px; border-radius: 6px; color: var(--ink); background: rgba(255,255,255,.92); box-shadow: 0 2px 8px rgba(21,34,56,.12); }
 .dog-card-photo { width: 100%; height: 135px; overflow: hidden; background: #e8edf4; }
 .dog-card-photo img { width: 100%; height: 100%; object-fit: contain; }
 .dog-card-body { padding: 13px; }
@@ -132,7 +142,9 @@ label input:focus, label textarea:focus { border-color: var(--blue); box-shadow:
 .dog-detail-header h3 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.04em; }
 .dog-detail-header p { margin: 0; color: var(--muted); font-size: 11px; }
 .dog-detail-actions { display: flex; align-items: center; gap: 7px; }
-.dog-detail-close, .dog-detail-delete { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: white; font-size: 10px; font-weight: 750; }
+.dog-detail-close, .dog-detail-delete, .dog-detail-update { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: white; font-size: 10px; font-weight: 750; }
+.dog-detail-update { border-color: #c8d8f6; color: var(--blue); }
+.dog-detail-update:hover { background: #f3f7ff; }
 .dog-detail-delete { border-color: #f0caca; color: var(--red); }
 .dog-detail-delete:hover { background: #fff5f5; }
 .dog-detail-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 15px; }
@@ -147,6 +159,17 @@ label input:focus, label textarea:focus { border-color: var(--blue); box-shadow:
 .dog-image-grid figure { height: 145px; margin: 0; overflow: hidden; border-radius: 9px; background: #eef2f7; }
 .dog-image-grid img { width: 100%; height: 100%; object-fit: contain; }
 .dog-detail-empty { padding: 18px; border-radius: 9px; color: var(--muted); background: #f5f7fa; font-size: 11px; }
+.dog-update-form { margin: 0 0 18px; padding: 15px; border: 1px solid #dce6f5; border-radius: 11px; background: #f8fbff; }
+.dog-update-form .eyebrow { margin-bottom: 5px; color: var(--blue); }
+.dog-update-copy { margin: 0 0 11px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.dog-update-dropzone { display: flex; min-height: 75px; align-items: center; justify-content: center; flex-direction: column; gap: 4px; padding: 12px; border: 1px dashed #aebfd9; border-radius: 9px; color: var(--muted); background: white; text-align: center; cursor: pointer; }
+.dog-update-dropzone input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.dog-update-dropzone strong { color: var(--ink); font-size: 11px; }
+.dog-update-dropzone > span:not(.upload-glyph):not(.file-name) { font-size: 10px; }
+.dog-update-dropzone .file-name { margin-top: 3px; color: var(--blue); font-size: 10px; font-weight: 750; }
+.secondary-button { margin-top: 10px; padding: 9px 12px; border: 1px solid #bdd0f1; border-radius: 7px; color: var(--blue); background: white; font-size: 10px; font-weight: 800; }
+.secondary-button:hover { background: #f0f5ff; }
+.success-result { border-color: #c7e5d0; color: #217343; background: #f3fbf5; }
 footer { display: flex; justify-content: space-between; padding: 38px 4px 0; color: #8995a5; font-size: 10px; font-weight: 650; }
 .hidden { display: none !important; }
 

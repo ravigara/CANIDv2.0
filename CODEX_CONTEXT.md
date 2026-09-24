@@ -588,10 +588,88 @@ test images receiving a verified result. Because valid/test identities are
 currently unseen dogs, these are open-set smoke results only and are not a
 biometric acceptance metric.
 
+## Whole-nose cascade migration (2026-09-23)
+
+The active gallery now uses a versioned two-stage representation in
+`output/index/cascade_meta.json`. Enrollment stores both a normalized whole-
+nose centroid and independent `rhinarium`, `left_nare`, `right_nare`, and
+`philtrum` centroids. Identification retrieves up to the configured
+`cascade_retrieval_k` whole-nose candidates, then reranks them with a weighted
+combination of whole-nose and anatomy-feature scores. The default weights are
+0.25 whole nose and 0.75 anatomy features, with a strict final score above
+0.50.
+
+The previous anatomy-only gallery remains intact in
+`output/index/feature_meta.json`. The CLI accepts `--feature-only` for direct
+comparison, and the web service accepts `NOSEID_GALLERY_MODE=feature` as a
+rollback switch. Building the cascade gallery reuses the existing checkpoint
+at `output/models/embedding_best.pt`; it recomputes vectors but does not train
+any model.
+
+The current cascade rebuild enrolled 29 identities from 202 usable source
+images across the identity, registration, and registry photo roots. All four
+anatomy features were represented for every enrolled identity. This is an
+integration smoke result, not evidence of biometric accuracy; compare
+feature-only and cascade behavior on same-breed, session-separated test
+images before selecting the final production path.
+
+## Full-photo cascade migration (2026-09-23)
+
+The active gallery now also has a reversible full-photo candidate stage in
+`output/index/full_photo_cascade_meta.json`. A fast frozen full-frame
+appearance descriptor is created from the complete uploaded photograph. It
+does not use the nose-trained checkpoint on the full image and does not train
+another model. Its top candidates are unioned with whole-nose candidates, then
+the existing anatomical feature embeddings perform the final reranking.
+
+The current score weights are 0.15 full-photo appearance, 0.25 whole-nose,
+and 0.60 anatomy features. The full-photo stage is intentionally low-weight
+because background, coat colour, pose, camera, and lighting can create false
+similarity between same-breed dogs. It is a coarse candidate generator, not a
+hard filter.
+
+The new gallery was built from 252 source images, with 214 usable vectors and
+30 enrolled identities. It reuses the existing whole-nose/anatomy templates
+where available and preserves `cascade_meta.json` unchanged. The active API
+loads the full-photo gallery when present. Roll back without deleting anything:
+
+```powershell
+$env:NOSEID_GALLERY_MODE = "cascade"
+python run_frontend.py
+```
+
+Use `NOSEID_GALLERY_MODE=feature` for the earlier anatomy-only path. The new
+CLI and batch registration code automatically use the full-photo gallery when
+it exists. This remains a development experiment and needs session-separated
+known-dog and same-breed evaluation before production use.
+
+## Registry reset and bulk deletion (2026-09-23)
+
+The active full-photo gallery was intentionally cleared for a fresh start:
+`output/index/full_photo_cascade_meta.json` now contains zero active dog
+records, and `output/registry/` has no profile-photo directories. The original
+`registration/` source folders and the rollback `cascade_meta.json` and
+`feature_meta.json` galleries were preserved. Restart the frontend after the
+reset so its lazy runtime reloads the empty active gallery.
+
+The Registered Dogs UI now supports checkbox selection, select-all, and bulk
+deletion through `POST /api/dogs/bulk-delete`. Bulk deletion uses the same
+validated direct-child registry path as single deletion and never removes
+source folders.
+
+The Registered Dogs profile detail view now supports updating a dog's identity
+images through `POST /api/dogs/{dog_id}/images`. New photos are appended to
+the active registry, and the selected dog's full-photo, whole-nose, and
+anatomical templates are rebuilt from the retained historical registry photos
+plus the new photos. The active gallery JSON is replaced atomically and the
+update restores the previous in-memory gallery and photo files if processing
+or persistence fails. Preserved `registration/` source folders and legacy
+galleries are not changed.
+
 ## Browser application (2026-09-23)
 
 The repository now includes a no-build browser frontend and a FastAPI service
-for the active feature gallery. Start it from the project root with:
+for the active full-photo cascade gallery. Start it from the project root with:
 
 ```powershell
 python run_frontend.py
@@ -600,9 +678,10 @@ python run_frontend.py
 The UI provides two flows:
 
 - Registration accepts a dog name, optional ID/breed, and at least three
-  photos. It runs the current detector -> anatomy -> feature-embedding flow,
-  persists the first photo as the display profile image, and saves metadata
-  plus anatomy-specific templates in `output/index/feature_meta.json`.
+  photos. It runs the full-photo -> detector -> anatomy -> feature-embedding
+  flow, persists all submitted photos, and saves metadata plus full-photo,
+  whole-nose, and anatomy-specific templates in
+  `output/index/full_photo_cascade_meta.json`.
 - Identification accepts one photo. A recognized response includes the dog
   name and profile photo. A non-match is explicitly labeled `Not recognized`
   and includes ranked possible matches with confidence percentages.
@@ -652,6 +731,8 @@ this UI does not trigger retraining.
 - `scripts/train_embedding.py`: identity embedding training.
 - `scripts/evaluate_identity_embeddings.py`: checkpoint pair/open-set evaluation.
 - `scripts/build_identity_gallery.py`: build the anatomy-feature identity gallery.
+- `scripts/build_cascade_gallery.py`: build whole-nose retrieval plus feature reranking templates.
+- `scripts/build_full_photo_gallery.py`: build the reversible full-photo plus nose cascade.
 - `scripts/test_identity_gallery.py`: disposable feature-gallery smoke test.
 - `scripts/register_directory.py`: batch-enroll per-dog registration folders.
 - `noseid/api/app.py`: FastAPI registration/identification service.
@@ -659,6 +740,9 @@ this UI does not trigger retraining.
 - `run_frontend.py`: local Uvicorn entry point.
 - `noseid/embedding/features.py`: per-anatomy crops and shared embeddings.
 - `noseid/matching/feature_index.py`: per-feature template storage and matching.
+- `noseid/matching/cascade_index.py`: whole-nose candidate retrieval and feature reranking.
+- `noseid/matching/full_photo_cascade_index.py`: full-photo/whole-nose candidate union and anatomy reranking.
+- `noseid/embedding/full_photo.py`: frozen complete-image coarse descriptor.
 - `noseid/biometric.py`: pipeline construction and orchestration.
 - `noseid/pipeline/detection.py`: detector runtime wrapper.
 - `noseid/pipeline/segmentation.py`: anatomy runtime wrapper.

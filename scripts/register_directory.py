@@ -6,7 +6,7 @@ Expected layout::
       dog1/*.jpg
       dog2/*.jpg
 
-The active anatomy-feature gallery is updated once after all folders are
+The active full-photo cascade gallery is updated once after all folders are
 processed. Existing gallery entries are preserved and same-ID entries are
 replaced with the new enrollment.
 """
@@ -28,17 +28,24 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 def register_directory(source: str, index_path: str, min_valid: int = 3) -> dict:
     from noseid.biometric import build_pipeline, enroll_dog, registration_response
-    from noseid.matching import FeatureIndex
+    from noseid.matching import (CascadeFeatureIndex, FeatureIndex,
+                                 FullPhotoCascadeIndex)
 
     root = Path(source)
     destination = Path(index_path)
     if not root.is_dir():
         raise FileNotFoundError(f"registration directory not found: {root}")
-    if not (destination / "feature_meta.json").is_file():
+    if not ((destination / "full_photo_cascade_meta.json").is_file() or
+            (destination / "cascade_meta.json").is_file() or
+            (destination / "feature_meta.json").is_file()):
         raise FileNotFoundError(
-            f"active feature gallery not found: {destination / 'feature_meta.json'}")
+            f"active gallery not found in {destination}")
 
-    index = FeatureIndex.load(str(destination))
+    index = (FullPhotoCascadeIndex.load(str(destination))
+             if (destination / "full_photo_cascade_meta.json").is_file()
+             else CascadeFeatureIndex.load(str(destination))
+             if (destination / "cascade_meta.json").is_file()
+             else FeatureIndex.load(str(destination)))
     pipeline = build_pipeline()
     results = []
     dog_dirs = sorted((path for path in root.iterdir() if path.is_dir()),

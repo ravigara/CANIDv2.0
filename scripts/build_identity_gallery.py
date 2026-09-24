@@ -1,9 +1,9 @@
-"""Build the anatomy-specific identity gallery.
+"""Build the previous anatomy-only identity gallery.
 
-The old gallery embedded normalized whole-nose crops. The active gallery now
-replays the already-trained detector -> landmarks -> segmentation pipeline on
-the original identity images and stores one centroid per detected anatomical
-feature. No upstream model retraining is performed here.
+This remains available as the rollback/comparison builder. The active gallery
+is built by ``scripts/build_cascade_gallery.py``. It replays the already-trained
+detector -> landmarks -> segmentation pipeline and stores one centroid per
+detected anatomical feature. No upstream model retraining is performed here.
 
 Example:
     python scripts/build_identity_gallery.py --source-data identity_data --device 0

@@ -96,7 +96,12 @@
             <div><p class="eyebrow">REGISTRY</p><h2>Registered dogs</h2></div>
             <button class="text-button" id="refresh-dogs" type="button">Refresh</button>
           </div>
-          <p class="registry-intro">Select a dog to view every photo saved in its registration profile.</p>
+          <p class="registry-intro">Select a dog to view its photos and add current images when its appearance changes, or select multiple profiles to delete them together.</p>
+          <div class="registry-tools hidden" id="registry-tools">
+            <label class="select-all-dogs"><input id="select-all-dogs" type="checkbox"><span>Select all</span></label>
+            <span class="selection-count" id="selection-count">0 selected</span>
+            <button class="bulk-delete-button" id="delete-selected-dogs" type="button" disabled>Delete selected</button>
+          </div>
           <div class="dog-grid" id="dog-grid"><div class="registry-loading">Loading registered dogs…</div></div>
           <div class="dog-detail hidden" id="dog-detail"></div>
         </section>
